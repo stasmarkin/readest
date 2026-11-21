@@ -266,3 +266,17 @@ describe('AboutWindow check update error auto-revert', () => {
     expect(screen.getByRole('button', { name: 'Check Update' })).toBeTruthy();
   });
 });
+
+describe('AboutWindow with the updater disabled at build time', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllEnvs();
+  });
+
+  it('hides the update check and recent updates button', async () => {
+    vi.stubEnv('NEXT_PUBLIC_DISABLE_UPDATER', '1');
+    await openDialog();
+
+    expect(screen.queryByRole('button', { name: 'Check Update' })).toBeNull();
+  });
+});

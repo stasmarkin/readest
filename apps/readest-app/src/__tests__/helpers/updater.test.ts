@@ -455,6 +455,22 @@ describe('updater', () => {
       expect(result).toBe(true);
       expect(mockTauriFetch).toHaveBeenCalledWith('https://example.com/release-notes.json');
     });
+
+    test('skips the release notes fetch when the updater is disabled at build time', async () => {
+      vi.stubEnv('NEXT_PUBLIC_DISABLE_UPDATER', '1');
+      const mockFetchFn = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', mockFetchFn);
+
+      try {
+        const result = await checkAppReleaseNotes(false);
+
+        expect(result).toBe(false);
+        expect(mockFetchFn).not.toHaveBeenCalled();
+        expect(mockSetUpdaterWindowVisible).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   // ── semver usage validation ────────────────────────────────────

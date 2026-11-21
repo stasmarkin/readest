@@ -173,7 +173,7 @@ export const AboutWindow = () => {
               </button>
             </div>
             <div className='my-1 h-5'>
-              {!updateStatus && (
+              {!updateStatus && !process.env['NEXT_PUBLIC_DISABLE_UPDATER'] && (
                 <button
                   className='btn btn-sm btn-primary cursor-pointer p-1 text-xs'
                   onClick={appService?.hasUpdater ? handleCheckUpdate : handleShowRecentUpdates}

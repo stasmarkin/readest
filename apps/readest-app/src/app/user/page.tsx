@@ -16,6 +16,7 @@ import { useAvailablePlans } from '@/hooks/useAvailablePlans';
 import type { PlanType } from '@/types/quota';
 import type { GiftCardsResponse, GiftPrice } from '@/types/gift';
 import { navigateBackFromProfile } from '@/utils/nav';
+import { isSelfHosted } from '@/utils/access';
 import { eventDispatcher } from '@/utils/event';
 import { isTauriAppPlatform } from '@/services/environment';
 import { getPlanDetails, shouldUseBillingPortal } from './utils/plan';
@@ -530,17 +531,19 @@ const ProfilePage = () => {
                   </div>
                 ) : (
                   <>
-                    <div className='flex flex-col gap-y-8 px-2 sm:px-6'>
-                      <PlansComparison
-                        availablePlans={availablePlans}
-                        userPlan={userProfilePlan}
-                        customizationPurchased={customizationPurchased}
-                        gift={gift}
-                        giftPrices={giftPrices}
-                        onSubscribe={buyThroughIAP ? handleIAPSubscribe : handleStripeSubscribe}
-                        onGiftCard={handleGiftCard}
-                      />
-                    </div>
+                    {!isSelfHosted() && (
+                      <div className='flex flex-col gap-y-8 px-2 sm:px-6'>
+                        <PlansComparison
+                          availablePlans={availablePlans}
+                          userPlan={userProfilePlan}
+                          customizationPurchased={customizationPurchased}
+                          gift={gift}
+                          giftPrices={giftPrices}
+                          onSubscribe={buyThroughIAP ? handleIAPSubscribe : handleStripeSubscribe}
+                          onGiftCard={handleGiftCard}
+                        />
+                      </div>
+                    )}
                     <div className='flex flex-col gap-y-8 px-6'>
                       <AccountActions
                         userEmail={userEmail}
