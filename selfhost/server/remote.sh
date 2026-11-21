@@ -112,6 +112,8 @@ stage_new_tree() {
     [[ -f "$srv/$f" ]] && cp -a "$srv/$f" "$new_tree/$f"
   done
   [[ $colima -eq 1 ]] || rm -f "$new_tree/compose.colima.yaml"
+  # AppleDouble files from a macOS tar would be picked up by the migrator's *.sql glob.
+  find "$new_tree" -name '._*' -delete
   [[ -d "$dir/wellknown" ]] && cp -a "$dir/wellknown" "$new_tree/wellknown"
   sed -E "s|^READEST_IMAGE=.*|READEST_IMAGE=ghcr.io/readest/readest:$tag|" "$dir/.env" >"$new_tree/.env"
   grep -q "^READEST_IMAGE=ghcr.io/readest/readest:$tag$" "$new_tree/.env" || echo "READEST_IMAGE=ghcr.io/readest/readest:$tag" >>"$new_tree/.env"
@@ -142,7 +144,7 @@ step1_checks() {
   log "file diff:"
   diff -rq "$dir" "$new_tree" 2>/dev/null | grep -v -E "(/backups|\.ops\.lock|/wellknown)" | sed "s|$new_tree|<new>|g" >&2 || true
   local pending
-  pending="$(comm -23 <(find "$new_tree/volumes/db/migrations" -name '*.sql' -exec basename {} \; | sort) <(applied_migrations | sort))"
+  pending="$(comm -23 <(find "$new_tree/volumes/db/migrations" -name '[0-9]*.sql' -exec basename {} \; | sort) <(applied_migrations | sort))"
   log "migrations to apply: $(echo "$pending" | grep -c . || true)"
   if [[ -n "$pending" ]]; then while read -r m; do echo "  $m" >&2; done <<<"$pending"; fi
   check_space

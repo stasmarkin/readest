@@ -68,7 +68,8 @@ if [[ $kind == colima ]]; then
 else
   ssh_opts=(-o RemoteCommand=none -o RequestTTY=no)
   remote_stage="$(ssh "${ssh_opts[@]}" "$host" 'mktemp -d')"
-  tar -C "$stage" -cf - . | ssh "${ssh_opts[@]}" "$host" "tar -x -C '$remote_stage'"
+  # COPYFILE_DISABLE: macOS tar would add AppleDouble ._* files, and the migrator globs *.sql.
+  COPYFILE_DISABLE=1 tar -C "$stage" -cf - . | ssh "${ssh_opts[@]}" "$host" "tar -x -C '$remote_stage'"
   status=0
   ssh "${ssh_opts[@]}" "$host" "bash '$remote_stage/selfhost/server/remote.sh' ${args[*]} '$remote_stage' ${flags[*]+${flags[*]}}" || status=$?
   ssh "${ssh_opts[@]}" "$host" "rm -rf '$remote_stage'" || true
