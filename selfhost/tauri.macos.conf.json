@@ -1,0 +1,15 @@
+{
+  "productName": "Readest Selfhost",
+  "identifier": "com.readest.selfhost",
+  "build": {
+    "beforeBuildCommand": "pnpm build"
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": []
+    }
+  }
+}
