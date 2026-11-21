@@ -30,6 +30,15 @@ fi
 build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
 [[ -x "$build_tools/aapt" && -x "$build_tools/apksigner" ]] || die "no aapt/apksigner in $build_tools"
 
+# Gradle's JVM ignores HTTPS_PROXY; hand it over as system properties (every JVM, incl. the daemon).
+proxy="${HTTPS_PROXY:-${https_proxy:-}}"
+if [[ -n "$proxy" && "${JAVA_TOOL_OPTIONS:-}" != *proxyHost* ]]; then
+  hostport="${proxy#*://}"
+  hostport="${hostport%%/*}"
+  hostport="${hostport##*@}"
+  export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:-} -Dhttps.proxyHost=${hostport%:*} -Dhttps.proxyPort=${hostport##*:} -Dhttp.proxyHost=${hostport%:*} -Dhttp.proxyPort=${hostport##*:} -Dhttp.nonProxyHosts=localhost|127.*"
+fi
+
 bash "$here/tauri-config-check.sh" "$here/tauri.android.conf.json" --mobile
 
 # The Android project is only partly tracked; generate the rest like scripts/worktree-new.ts does.
