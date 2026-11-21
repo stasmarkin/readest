@@ -107,6 +107,13 @@ stage_new_tree() {
   new_tree="$(mktemp -d)"
   cp -a "$bundle/docker/compose.yaml" "$new_tree/"
   cp -a "$bundle/docker/volumes" "$new_tree/volumes"
+  [[ -f "$bundle/docker/README.md" ]] && cp -a "$bundle/docker/README.md" "$new_tree/README.md"
+  # Kong also sits on the shared coolify network, where bare service names can resolve to other
+  # projects' containers; upstream's kong.yml uses them, so point it at this stack's container names.
+  sed -i -E 's#http://auth:9999#http://supabase-auth:9999#g; s#http://rest:3000#http://supabase-rest:3000#g' "$new_tree/volumes/api/kong.yml"
+  if grep -qE 'http://(auth|rest|kong|db|minio|client):' "$new_tree/volumes/api/kong.yml"; then
+    die "kong.yml still routes to a bare service name"
+  fi
   local f
   for f in compose.override.yaml wellknown.conf backup.sh README-deploy.md compose.maintenance.yaml compose.colima.yaml smoke.sh remote.sh; do
     [[ -f "$srv/$f" ]] && cp -a "$srv/$f" "$new_tree/$f"
