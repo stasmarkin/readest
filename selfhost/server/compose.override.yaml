@@ -16,6 +16,8 @@ services:
       - traefik.http.routers.readest-kong.priority=100
       - traefik.http.services.readest-kong.loadbalancer.server.port=8000
   minio:
+    # Pinned like the deployed stack; upstream leaves quay.io/minio/minio floating.
+    image: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z
     ports: !reset []
     networks: [default, coolify]
     labels:
@@ -27,6 +29,8 @@ services:
       - traefik.http.routers.readest-minio.tls.certresolver=letsencrypt
       - traefik.http.routers.readest-minio.priority=100
       - traefik.http.services.readest-minio.loadbalancer.server.port=9000
+  minio-setup:
+    image: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z
   client:
     ports: !reset []
     networks: [default, coolify]

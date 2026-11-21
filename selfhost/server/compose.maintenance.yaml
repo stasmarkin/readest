@@ -1,0 +1,15 @@
+# Applied last while a deploy or rollback runs: no Traefik routes and no host ports, the stack only
+# talks inside its own network. Compose merges labels by key, so these override the override's ones.
+services:
+  kong:
+    ports: !reset []
+    labels:
+      - traefik.enable=false
+  minio:
+    ports: !reset []
+    labels:
+      - traefik.enable=false
+  client:
+    ports: !reset []
+    labels:
+      - traefik.enable=false
