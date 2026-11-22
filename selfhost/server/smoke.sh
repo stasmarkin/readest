@@ -26,8 +26,14 @@ kong="$(container kong)"
 client="$(container client)"
 minio="$(container minio)"
 [[ -n "$kong" && -n "$client" && -n "$minio" ]] || { echo "smoke: kong/client/minio not running" >&2; exit 1; }
-# The user with the most live files, so an empty account can't fail a healthy stack.
-user_id="$(docker exec supabase-db psql -U postgres -tAc "select coalesce((select user_id::text from public.files where deleted_at is null group by user_id order by count(*) desc limit 1), (select id::text from auth.users order by created_at limit 1))" | tr -d '[:space:]')"
+# The owner of the expected file, or the user with the most live files (an empty account can't fail a
+# healthy stack).
+if [[ -n "$expect_key" ]]; then
+  user_id="$(docker exec supabase-db psql -U postgres -tAc "select user_id::text from public.files where deleted_at is null and file_key = '${expect_key//\'/\'\'}' limit 1" | tr -d '[:space:]')"
+  [[ -n "$user_id" ]] || { echo "smoke: FAIL no live files row for the expected key" >&2; exit 1; }
+else
+  user_id="$(docker exec supabase-db psql -U postgres -tAc "select coalesce((select user_id::text from public.files where deleted_at is null group by user_id order by count(*) desc limit 1), (select id::text from auth.users order by created_at limit 1))" | tr -d '[:space:]')"
+fi
 files_in_db="$(docker exec supabase-db psql -U postgres -tAc "select count(*) from public.files where deleted_at is null and user_id::text = '$user_id'" | tr -d '[:space:]')"
 
 # Secrets go through a 600 env file, not argv, so they stay out of the process list.
@@ -64,8 +70,10 @@ const retry = async (what, fn) => {
 // fetch() rewrites Host to the URL's host, which breaks the SigV4 signature of a presigned URL;
 // node:http keeps the signed Host while connecting to MinIO inside the network.
 const download = (signed) => PUBLIC ? fetch(signed).then(async (r) => {
-  const buf = Buffer.from(await r.arrayBuffer());
-  return { status: r.status, size: buf.length, sha: crypto.createHash('sha256').update(buf).digest('hex') };
+  const hash = crypto.createHash('sha256');
+  let size = 0;
+  for await (const chunk of r.body ?? []) { hash.update(chunk); size += chunk.length; }
+  return { status: r.status, size, sha: hash.digest('hex') };
 }) : new Promise((resolve, reject) => {
   const u = new URL(signed);
   const [host, port] = MINIO.split(':');

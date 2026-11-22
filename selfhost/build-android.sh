@@ -77,6 +77,11 @@ trap cleanup EXIT
 
 # keystore.properties may hold the regular release signing config (or link to it); park it.
 ks_props="$gen/keystore.properties"
+# A build killed before its cleanup left the original parked; put it back before parking again.
+if [[ -e "$ks_props.before-selfhost" || -L "$ks_props.before-selfhost" ]]; then
+  rm -f "$ks_props"
+  mv "$ks_props.before-selfhost" "$ks_props"
+fi
 if [[ -e "$ks_props" || -L "$ks_props" ]]; then
   mv "$ks_props" "$ks_props.before-selfhost"
   cleanup_cmds+=('rm -f "$ks_props"; mv "$ks_props.before-selfhost" "$ks_props"')

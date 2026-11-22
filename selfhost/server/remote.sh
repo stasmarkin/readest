@@ -34,8 +34,10 @@ if [[ "$mode" == rollback && $accept_loss -ne 1 ]]; then
   log "rollback to $arg loses every write made after that snapshot; repeat with --accept-loss"
   exit 2
 fi
-# A rollback must work even when a failed deploy left <dir> half-written.
-if [[ "$mode" != rollback ]]; then
+# A rollback must work even when a failed deploy left <dir> half-written; it only needs the snapshots.
+if [[ "$mode" == rollback ]]; then
+  [[ -d "$dir/backups" ]] || die "$dir/backups does not exist"
+else
   [[ -d "$dir" && -f "$dir/.env" && -f "$dir/compose.yaml" ]] || die "$dir is not a Readest stack"
 fi
 
@@ -279,24 +281,56 @@ assert all(isinstance(c.get(k), str) and c[k].strip() for k in ("apiBaseUrl", "s
   log "public routes open and healthy"
 }
 
+# Stops every running container of the project, whatever config is on disk; fails if Docker can't tell.
+stop_project() {
+  local running
+  running="$(docker ps -q --filter "label=com.docker.compose.project=$project")" || return 1
+  if [[ -n "$running" ]]; then
+    # shellcheck disable=SC2086
+    docker stop $running >&2 || return 1
+  fi
+  running="$(docker ps -q --filter "label=com.docker.compose.project=$project")" || return 1
+  [[ -z "$running" ]]
+}
+
+# Snapshot before a manual rollback: works on a stopped or half-written stack (no backup.sh, no
+# compose config needed) — the volume copies are the backup.
+snapshot_before_rollback() {
+  local snap cid
+  snap="$dir/backups/rollback-$(date +%Y%m%d-%H%M%S)"
+  mkdir -m 700 "$snap" || return 1
+  : >"$snap/images.tsv"
+  for cid in $(docker ps -aq --filter "label=com.docker.compose.project=$project"); do
+    printf '%s\t%s\t%s\ttag\n' "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$cid")" \
+      "$(docker inspect -f '{{.Config.Image}}' "$cid")" "$(docker inspect -f '{{.Image}}' "$cid")" >>"$snap/images.tsv" || return 1
+  done
+  stop_project || return 1
+  tar -C "$dir" --exclude=./backups --exclude=./.ops.lock -czf "$snap/config.tgz" . || return 1
+  local vol
+  for vol in db-data minio-data; do
+    docker run --rm -v "${project}_$vol:/v:ro" -v "$snap:/s" alpine sh -c "tar -C /v -cf /s/$vol.tar . && tar -tf /s/$vol.tar >/dev/null" || return 1
+  done
+  log "current state saved to $snap (volumes and config; images by tag only)"
+}
+
 restore() {
   local snap="$1"
   [[ -f "$snap/config.tgz" && -f "$snap/db-data.tar" && -f "$snap/minio-data.tar" ]] || die "$snap is incomplete"
   log "restoring $snap"
   if [[ -f "$dir/compose.yaml" && -f "$dir/.env" ]]; then dc down >&2 || true; fi
   # Volumes are wiped below: nothing of the project may still be running, whatever config is on disk.
-  local running
-  running="$(docker ps -q --filter "label=com.docker.compose.project=$project")"
-  if [[ -n "$running" ]]; then
-    # shellcheck disable=SC2086
-    docker stop $running >&2 || die "cannot stop the running stack; nothing restored"
-  fi
-  [[ -z "$(docker ps -q --filter "label=com.docker.compose.project=$project")" ]] || die "stack still running; nothing restored"
+  stop_project || die "cannot stop the running stack; nothing restored"
   find "$dir" -mindepth 1 -maxdepth 1 ! -name backups ! -name .ops.lock ! -name backup.sh -exec rm -rf {} +
   tar -C "$dir" --exclude=./backup.sh -xzf "$snap/config.tgz"
+  # The cron job needs a backup.sh with the shared lock, whatever this snapshot carried.
+  if ! grep -q 'ops.lock' "$dir/backup.sh" 2>/dev/null; then
+    cp -a "$srv/backup.sh" "$dir/.backup.sh.new" && chmod 700 "$dir/.backup.sh.new" && mv "$dir/.backup.sh.new" "$dir/backup.sh"
+  fi
   local svc img id digest
   while IFS=$'\t' read -r svc img id digest; do
-    if [[ "$digest" == - ]]; then
+    if [[ "$digest" == tag ]]; then
+      docker image inspect "$id" >/dev/null 2>&1 && docker tag "$id" "$img"
+    elif [[ "$digest" == - ]]; then
       docker load -i "$snap/images/$svc.tar" >&2
       docker tag "$id" "$img"
     elif ! docker image inspect "$id" >/dev/null 2>&1; then
@@ -349,7 +383,7 @@ case "$mode" in
     step1_checks "$arg"
     snap="$(snapshot deploy)" || exit 1
     log "step 3: install files, pull, migrate (closed)"
-    if ! { find "$dir" -mindepth 1 -maxdepth 1 ! -name backups ! -name .ops.lock ! -name wellknown -exec rm -rf {} + &&
+    if ! { find "$dir" -mindepth 1 -maxdepth 1 ! -name backups ! -name .ops.lock ! -name wellknown ! -name backup.sh -exec rm -rf {} + &&
       cp -a "$new_tree/." "$dir/" && rm -rf "$new_tree" && dc maint pull >&2 && dc maint up -d >&2 && wait_db maint &&
       dc maint exec -T db /docker-entrypoint-initdb.d/zz-readest-migrations.sh >&2 &&
       dc maint exec -T db psql -U postgres -c "NOTIFY pgrst, 'reload schema'" >&2; }; then
@@ -385,8 +419,7 @@ case "$mode" in
     [[ -d "$snap" ]] || snap="$dir/backups/rollback-$arg"
     [[ -d "$snap" ]] || die "no snapshot $arg"
     check_space
-    current="$(snapshot rollback)" || exit 1
-    log "current state saved to $current"
+    snapshot_before_rollback || die "could not save the current state; nothing restored"
     restore "$snap"
     ;;
   *) die "unknown mode $mode" ;;
