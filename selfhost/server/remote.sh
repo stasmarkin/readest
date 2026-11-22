@@ -394,7 +394,7 @@ restore() {
   done <"$snap/images.tsv"
   local vol
   for vol in db-data db-config minio-data; do
-    [[ -f "$snap/$vol.tar" ]] || continue
+    grep -q " $vol.tar\$" "$snap/SHA256SUMS" || continue
     docker run --rm -v "${project}_$vol:/v" -v "$snap:/s:ro" alpine sh -c "find /v -mindepth 1 -delete && tar -C /v -xf /s/$vol.tar" ||
       die "restoring volume $vol from $snap failed; the stack stays down — fix the cause and run: deploy.sh --rollback $(basename "$snap" | sed -E 's/^(deploy|rollback)-//') --accept-loss"
   done
@@ -452,16 +452,12 @@ case "$mode" in
       restore "$snap"
       exit 1
     fi
-    # Migrations ran with only the database up; now the rest, still without public routes.
-    if ! { dc maint up -d >&2 && dc maint exec -T db psql -U postgres -c "NOTIFY pgrst, 'reload schema'" >&2; }; then
-      log "starting the closed stack failed; rolling back"
-      restore "$snap"
-      exit 1
-    fi
-    if ! probe_closed; then
-      # Clients may already have written to the new stack: stop, but don't roll back over their data.
-      dc down >&2
-      die "public routes were reachable in maintenance; stack stopped, nothing rolled back. Inspect, then deploy.sh --deploy again or --rollback $(basename "$snap" | sed 's/^deploy-//') --accept-loss"
+    # Migrations ran with only the database up; now the rest, still without public routes. From here
+    # on public-facing services exist, so a failure stops them instead of rolling back over writes
+    # they might have taken; the database stays up so a new --deploy can start from this state.
+    if ! { dc maint up -d >&2 && dc maint exec -T db psql -U postgres -c "NOTIFY pgrst, 'reload schema'" >&2 && probe_closed; }; then
+      dc stop kong client minio >&2 || true
+      die "the closed stack did not come up cleanly; kong, client and minio stopped, nothing rolled back. Inspect, then deploy.sh --deploy again or --rollback $(basename "$snap" | sed 's/^deploy-//') --accept-loss"
     fi
     smoke_args=()
     [[ $fail_smoke -eq 1 ]] && smoke_args+=(--force-fail)
@@ -489,6 +485,7 @@ case "$mode" in
     current="$(snapshot rollback rollback)" || die "could not save the current state; nothing restored"
     log "current state saved to $current"
     restore "$snap"
+    rotate
     ;;
   *) die "unknown mode $mode" ;;
 esac

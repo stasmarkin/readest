@@ -13,10 +13,18 @@ vm_dir="$(colima ssh -- sh -c 'echo $HOME')/readest-stand"
 cmd="${1:?usage: stand.sh up|down}"
 
 vm() { colima ssh -- bash -c "$1"; }
-# The stand is the compose project "readest" in the default colima VM; never touch one that lives elsewhere.
-owner="$(vm "docker ps -a --filter label=com.docker.compose.project=readest --format '{{index .Labels \"com.docker.compose.project.working_dir\"}}' | sort -u")"
-if [[ -n "$owner" && "$owner" != "$vm_dir" ]]; then
-  echo "stand: compose project 'readest' in this VM belongs to $owner, not the stand; refusing" >&2
+# The stand is the compose project "readest" in the default colima VM. Its containers and volumes
+# may only be touched when they are the stand's: containers started from the stand dir, and volumes
+# only while the stand marker exists (a stopped foreign project leaves volumes without containers).
+owners="$(vm "docker ps -a --filter label=com.docker.compose.project=readest --format '{{.Label \"com.docker.compose.project.working_dir\"}}'")" ||
+  { echo "stand: cannot list containers in the VM" >&2; exit 1; }
+if [[ -n "$(grep -vxF "$vm_dir" <<<"$owners" | grep . || true)" ]]; then
+  echo "stand: compose project 'readest' in this VM is not the stand ($(sort -u <<<"$owners" | tr '\n' ' ')); refusing" >&2
+  exit 1
+fi
+volumes="$(vm "docker volume ls -q --filter name=^readest_")" || { echo "stand: cannot list volumes in the VM" >&2; exit 1; }
+if [[ -n "$volumes" ]] && ! vm "test -f $vm_dir/.readest-stand"; then
+  echo "stand: readest_* volumes exist in this VM but no stand marker at $vm_dir; refusing" >&2
   exit 1
 fi
 compose="docker compose --project-directory $vm_dir --env-file $vm_dir/.env -f $vm_dir/compose.yaml -f $vm_dir/compose.override.yaml -f $vm_dir/compose.colima.yaml"
@@ -59,7 +67,7 @@ case "$cmd" in
     find "$stage" -name '._*' -delete
     vm "docker network inspect coolify >/dev/null 2>&1 || docker network create coolify >/dev/null
       [ -d $vm_dir ] && $compose down -v --remove-orphans >/dev/null 2>&1 || true
-      sudo rm -rf $vm_dir && mkdir -p $vm_dir && cp -a $stage/. $vm_dir/ && chmod 600 $vm_dir/.env
+      sudo rm -rf $vm_dir && mkdir -p $vm_dir && cp -a $stage/. $vm_dir/ && chmod 600 $vm_dir/.env && touch $vm_dir/.readest-stand
       $compose up -d"
     for _ in $(seq 1 60); do
       if vm "docker exec supabase-db psql -U postgres -tAc 'select count(*) from readest_meta.migrations'" 2>/dev/null | grep -qx "$want_migrations"; then
