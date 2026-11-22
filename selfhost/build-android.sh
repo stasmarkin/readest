@@ -78,6 +78,13 @@ trap cleanup EXIT
 # Gradle reads the signing config from READEST_KEYSTORE_PROPERTIES, so the checkout's own
 # keystore.properties (the regular release config) is never touched.
 ks_props="$key_dir/keystore.properties"
+# Older versions of this script wrote our config into the checkout; never leave it for regular builds.
+legacy="$gen/keystore.properties"
+if [[ -f "$legacy" ]] && grep -q '^keyAlias=readest-selfhost$' "$legacy"; then
+  rm -f "$legacy"
+  if [[ -e "$legacy.before-selfhost" || -L "$legacy.before-selfhost" ]]; then mv "$legacy.before-selfhost" "$legacy"; fi
+fi
+rm -f "$legacy.selfhost-owned"
 (umask 077 && printf 'keyAlias=readest-selfhost\npassword=%s\nstoreFile=%s\n' "$password" "$jks" >"$ks_props")
 export READEST_KEYSTORE_PROPERTIES="$ks_props"
 

@@ -201,7 +201,7 @@ wait_db() {
 snapshot() {
   local prefix="$1" kind="$2" ts snap part
   ts="$(date +%Y%m%d-%H%M%S)"
-  while [[ -e "$dir/backups/$prefix-$ts" || -e "$dir/backups/failed-$ts" ]]; do sleep 1; ts="$(date +%Y%m%d-%H%M%S)"; done
+  while [[ -e "$dir/backups/deploy-$ts" || -e "$dir/backups/rollback-$ts" || -e "$dir/backups/failed-$ts" ]]; do sleep 1; ts="$(date +%Y%m%d-%H%M%S)"; done
   snap="$dir/backups/$prefix-$ts"
   part="$dir/backups/.partial-$prefix-$ts"
   mkdir -p "$dir/backups" && mkdir -m 700 "$part" || return 1
@@ -321,6 +321,11 @@ stop_project() {
 restore_preflight() {
   local snap="$1"
   [[ -f "$snap/config.tgz" && -f "$snap/db-data.tar" && -f "$snap/minio-data.tar" && -f "$snap/images.tsv" ]] || die "$snap is incomplete"
+  # Read every archive to the end now: a truncated one must fail before the stack is touched.
+  if ! { gzip -t "$snap/config.tgz" && tar -tzf "$snap/config.tgz" >/dev/null &&
+    tar -tf "$snap/db-data.tar" >/dev/null && tar -tf "$snap/minio-data.tar" >/dev/null; }; then
+    die "$snap has a damaged archive; nothing restored"
+  fi
   local svc img id digest
   while IFS=$'\t' read -r svc img id digest; do
     case "$digest" in
@@ -424,6 +429,7 @@ case "$mode" in
   rollback)
     lock
     step0_cron_lock
+    [[ -d "$dir/backups/deploy-$arg" && -d "$dir/backups/rollback-$arg" ]] && die "both deploy-$arg and rollback-$arg exist; restore one by hand"
     snap="$dir/backups/deploy-$arg"
     [[ -d "$snap" ]] || snap="$dir/backups/rollback-$arg"
     [[ -d "$snap" ]] || die "no snapshot $arg"
