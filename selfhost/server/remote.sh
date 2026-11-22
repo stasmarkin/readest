@@ -95,12 +95,14 @@ for line in sys.stdin:
 ' "$dir/.env"
 }
 
+# A stack without the journal would get every migration re-applied; refuse instead of guessing.
 applied_migrations() {
-  docker exec supabase-db psql -U postgres -tAc 'select name from readest_meta.migrations order by name' 2>/dev/null || true
+  docker exec supabase-db psql -U postgres -tAc 'select name from readest_meta.migrations order by name' ||
+    die "cannot read readest_meta.migrations (is supabase-db up and the journal there?)"
 }
 
 volume_bytes() {
-  docker run --rm -v readest_db-data:/a:ro -v readest_minio-data:/b:ro alpine du -sbc /a /b 2>/dev/null | awk '/total/{print $1}'
+  docker run --rm -v readest_db-data:/a:ro -v readest_db-config:/c:ro -v readest_minio-data:/b:ro alpine du -sbc /a /b /c 2>/dev/null | awk '/total/{print $1}'
 }
 
 check_space() {
@@ -161,7 +163,9 @@ step1_checks() {
   log "file diff:"
   diff -rq "$dir" "$new_tree" 2>/dev/null | grep -v -E "(/backups|\.ops\.lock|/wellknown)" | sed "s|$new_tree|<new>|g" >&2 || true
   local pending
-  pending="$(comm -23 <(find "$new_tree/volumes/db/migrations" -name '[0-9]*.sql' -exec basename {} \; | sort) <(applied_migrations | sort))"
+  local applied
+  applied="$(applied_migrations)"
+  pending="$(comm -23 <(find "$new_tree/volumes/db/migrations" -name '[0-9]*.sql' -exec basename {} \; | sort) <(sort <<<"$applied"))"
   log "migrations to apply: $(echo "$pending" | grep -c . || true)"
   # 029 adds CHECK (file_size >= 0); an old negative row would abort it mid-deploy.
   local negative
@@ -251,11 +255,12 @@ snapshot() {
     return 1
   fi
   local vol
-  for vol in db-data minio-data; do
+  # db-config holds Postgres' custom config and the pgsodium root key, needed to read encrypted data.
+  for vol in db-data db-config minio-data; do
     docker run --rm -v "${project}_$vol:/v:ro" -v "$part:/s" alpine sh -c "tar -C /v -cf /s/$vol.tar . && tar -tf /s/$vol.tar >/dev/null" ||
       { snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; }
   done
-  (cd "$part" && sha256sum config.tgz db-data.tar minio-data.tar >SHA256SUMS) || { snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; }
+  (cd "$part" && sha256sum config.tgz db-data.tar db-config.tar minio-data.tar >SHA256SUMS) || { snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; }
   mv -T "$part" "$snap" || { snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; }
   log "snapshot $snap"
   echo "$snap"
@@ -353,7 +358,10 @@ restore_preflight() {
   [[ -f "$snap/config.tgz" && -f "$snap/db-data.tar" && -f "$snap/minio-data.tar" && -f "$snap/images.tsv" ]] || die "$snap is incomplete"
   # Checksums written when the snapshot was taken: a truncated or altered archive fails here,
   # before the stack is touched.
-  [[ "$(awk '{print $2}' "$snap/SHA256SUMS" 2>/dev/null | sort | tr '\n' ' ')" == "config.tgz db-data.tar minio-data.tar " ]] ||
+  # Snapshots taken before db-config was added carry three archives; both shapes are complete.
+  local sums
+  sums="$(awk '{print $2}' "$snap/SHA256SUMS" 2>/dev/null | sort | tr '\n' ' ')"
+  [[ "$sums" == "config.tgz db-config.tar db-data.tar minio-data.tar " || "$sums" == "config.tgz db-data.tar minio-data.tar " ]] ||
     die "$snap has no complete SHA256SUMS; nothing restored"
   (cd "$snap" && sha256sum -c --quiet SHA256SUMS) >&2 || die "$snap has a damaged archive; nothing restored"
   local svc img id digest
@@ -382,17 +390,18 @@ restore() {
     cp -a "$srv/backup.sh" "$dir/.backup.sh.new" && chmod 700 "$dir/.backup.sh.new" && mv "$dir/.backup.sh.new" "$dir/backup.sh"
   fi
   while IFS=$'\t' read -r svc img id digest; do
-    docker tag "$id" "$img"
+    docker tag "$id" "$img" || die "cannot tag $id as $img; config restored, volumes untouched, stack down"
   done <"$snap/images.tsv"
   local vol
-  for vol in db-data minio-data; do
-    docker run --rm -v "${project}_$vol:/v" -v "$snap:/s:ro" alpine sh -c "find /v -mindepth 1 -delete && tar -C /v -xf /s/$vol.tar"
+  for vol in db-data db-config minio-data; do
+    [[ -f "$snap/$vol.tar" ]] || continue
+    docker run --rm -v "${project}_$vol:/v" -v "$snap:/s:ro" alpine sh -c "find /v -mindepth 1 -delete && tar -C /v -xf /s/$vol.tar" ||
+      die "restoring volume $vol from $snap failed; the stack stays down — fix the cause and run: deploy.sh --rollback $(basename "$snap" | sed -E 's/^(deploy|rollback)-//') --accept-loss"
   done
   dc maint up -d --pull never >&2
   wait_db maint || die "database did not come back; the stack stays closed"
   smoke || die "smoke failed on the restored stack; the stack stays closed"
-  dc up -d --pull never >&2
-  probe_open || { dc maint up -d --pull never >&2; die "restored stack is not reachable from outside; closed again"; }
+  { dc up -d --pull never >&2 && probe_open; } || { dc maint up -d --pull never >&2; die "restored stack is not reachable from outside; closed again"; }
   log "restored $snap"
 }
 
@@ -412,6 +421,14 @@ rotate() {
   for snap in "${snaps[@]}"; do
     if [[ ! " ${keep[*]} " == *" $snap "* ]]; then rm -rf "$snap"; log "removed old snapshot $snap"; fi
   done
+  # Safety copies of manual rollbacks and leftovers of failed snapshots: the newest three of each.
+  local kind_prefix
+  for kind_prefix in rollback failed; do
+    find "$dir/backups" -maxdepth 1 -type d -name "$kind_prefix-*" | sort -r | tail -n +4 | while read -r snap; do
+      rm -rf "$snap"
+      log "removed old snapshot $snap"
+    done
+  done
 }
 
 case "$mode" in
@@ -429,18 +446,22 @@ case "$mode" in
     snap="$(snapshot deploy deploy)" || exit 1
     log "step 3: install files, pull, migrate (closed)"
     if ! { find "$dir" -mindepth 1 -maxdepth 1 ! -name backups ! -name .ops.lock ! -name wellknown ! -name backup.sh -exec rm -rf {} + &&
-      cp -a "$new_tree/." "$dir/" && rm -rf "$new_tree" && dc maint pull >&2 && dc maint up -d >&2 && wait_db maint &&
-      dc maint exec -T db /docker-entrypoint-initdb.d/zz-readest-migrations.sh >&2 &&
-      dc maint exec -T db psql -U postgres -c "NOTIFY pgrst, 'reload schema'" >&2; }; then
+      cp -a "$new_tree/." "$dir/" && rm -rf "$new_tree" && dc maint pull >&2 && dc maint up -d db >&2 && wait_db maint &&
+      dc maint exec -T db /docker-entrypoint-initdb.d/zz-readest-migrations.sh >&2; }; then
       log "step 3 failed; rolling back"
       restore "$snap"
       exit 1
     fi
-    if ! probe_closed; then
-      dc down >&2
-      log "routes were open during the closed phase; rolling back"
+    # Migrations ran with only the database up; now the rest, still without public routes.
+    if ! { dc maint up -d >&2 && dc maint exec -T db psql -U postgres -c "NOTIFY pgrst, 'reload schema'" >&2; }; then
+      log "starting the closed stack failed; rolling back"
       restore "$snap"
       exit 1
+    fi
+    if ! probe_closed; then
+      # Clients may already have written to the new stack: stop, but don't roll back over their data.
+      dc down >&2
+      die "public routes were reachable in maintenance; stack stopped, nothing rolled back. Inspect, then deploy.sh --deploy again or --rollback $(basename "$snap" | sed 's/^deploy-//') --accept-loss"
     fi
     smoke_args=()
     [[ $fail_smoke -eq 1 ]] && smoke_args+=(--force-fail)
@@ -449,8 +470,7 @@ case "$mode" in
       restore "$snap"
       exit 1
     fi
-    dc up -d >&2
-    if ! { probe_open && { [[ $colima -eq 1 ]] || smoke --public "$(envval SITE_URL)"; }; }; then
+    if ! { dc up -d >&2 && probe_open && { [[ $colima -eq 1 ]] || smoke --public "$(envval SITE_URL)"; }; }; then
       dc maint up -d >&2
       die "stack is up but not reachable from outside; closed again. Writes are open since the switch — inspect, then: deploy.sh --rollback $(basename "$snap" | sed 's/^deploy-//') --accept-loss"
     fi

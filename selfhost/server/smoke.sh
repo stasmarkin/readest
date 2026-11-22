@@ -69,7 +69,7 @@ const retry = async (what, fn) => {
 };
 // fetch() rewrites Host to the URL's host, which breaks the SigV4 signature of a presigned URL;
 // node:http keeps the signed Host while connecting to MinIO inside the network.
-const download = (signed) => PUBLIC ? fetch(signed).then(async (r) => {
+const download = (signed) => PUBLIC ? fetch(signed, { signal: AbortSignal.timeout(60_000) }).then(async (r) => {
   const hash = crypto.createHash('sha256');
   let size = 0;
   for await (const chunk of r.body ?? []) { hash.update(chunk); size += chunk.length; }
@@ -77,25 +77,26 @@ const download = (signed) => PUBLIC ? fetch(signed).then(async (r) => {
 }) : new Promise((resolve, reject) => {
   const u = new URL(signed);
   const [host, port] = MINIO.split(':');
-  const req = http.request({ host, port, path: u.pathname + u.search, headers: { Host: u.host } }, (res) => {
+  const req = http.request({ host, port, path: u.pathname + u.search, headers: { Host: u.host }, timeout: 60_000 }, (res) => {
     const hash = crypto.createHash('sha256');
     let size = 0;
     res.on('data', (c) => { hash.update(c); size += c.length; });
     res.on('end', () => resolve({ status: res.statusCode, size, sha: hash.digest('hex') }));
   });
+  req.on('timeout', () => req.destroy(new Error('download timed out')));
   req.on('error', reject);
   req.end();
 });
 
 (async () => {
   await retry('auth health', async () => {
-    const r = await fetch(`${KONG}/auth/v1/health`, { headers: { apikey: ANON_KEY } });
+    const r = await fetch(`${KONG}/auth/v1/health`, { headers: { apikey: ANON_KEY }, signal: AbortSignal.timeout(30_000) });
     if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
   });
   if (!USER_ID) { console.error('smoke: OK (no users yet; auth only)'); process.exit(0); }
   const auth = { Authorization: `Bearer ${jwt}` };
   const list = await retry('storage list', async () => {
-    const r = await fetch(`${CLIENT}/api/storage/list?pageSize=50`, { headers: auth });
+    const r = await fetch(`${CLIENT}/api/storage/list?pageSize=50`, { headers: auth, signal: AbortSignal.timeout(30_000) });
     if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
     if (!Array.isArray(j.files)) throw new Error('no files array');
@@ -107,7 +108,7 @@ const download = (signed) => PUBLIC ? fetch(signed).then(async (r) => {
   }
   const keys = EXPECT_KEY ? [EXPECT_KEY] : list.map((f) => f.file_key);
   for (const key of keys.slice(0, 50)) {
-    const r = await fetch(`${CLIENT}/api/storage/download?fileKey=${encodeURIComponent(key)}`, { headers: auth });
+    const r = await fetch(`${CLIENT}/api/storage/download?fileKey=${encodeURIComponent(key)}`, { headers: auth, signal: AbortSignal.timeout(30_000) });
     if (r.status !== 200) { if (EXPECT_KEY) fail(`download url for expected file: HTTP ${r.status}`); continue; }
     const { downloadUrl } = await r.json();
     const d = await download(downloadUrl);

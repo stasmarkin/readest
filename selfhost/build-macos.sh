@@ -30,7 +30,8 @@ actual_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Con
 
 bash "$here/bundle-smoke.sh" "$app_dir/out"
 bin="$bundle/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist")"
-if strings "$bin" | grep -qE 'download\.readest\.com/releases|github\.com/readest/readest/releases'; then
+# grep -c reads to the end: -q would exit early and, under pipefail, fail the pipeline with SIGPIPE.
+if [[ "$(strings "$bin" | grep -cE 'download\.readest\.com/releases|github\.com/readest/readest/releases')" -gt 0 ]]; then
   echo "build-macos: updater endpoints still compiled into $bin" >&2
   exit 1
 fi

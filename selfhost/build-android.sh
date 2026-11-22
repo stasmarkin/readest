@@ -47,6 +47,10 @@ if [[ ! -x "$gen/gradlew" ]]; then
   if [[ -n "$(git -C "$root" status --porcelain -- "$gen" "$app_dir/src-tauri/icons")" ]]; then
     die "local changes under $gen; commit or stash them before the Android project is regenerated"
   fi
+  # Ignored files (signing config, keystores) are invisible to git status but would be wiped too.
+  if [[ -n "$(find "$gen" \( -name 'keystore.properties*' -o -name '*.jks' -o -name '*.keystore' \) -print -quit 2>/dev/null)" ]]; then
+    die "$gen holds signing files; move them out before the Android project is regenerated"
+  fi
   (cd "$app_dir" && rm -rf "$gen" && pnpm tauri android init && pnpm tauri icon ../../data/icons/readest-book.png)
   git -C "$root" checkout -- "$gen" "$app_dir/src-tauri/icons"
 fi
@@ -104,7 +108,7 @@ bash "$here/bundle-smoke.sh" "$app_dir/out"
 libs="$(mktemp -d)"
 cleanup_cmds+=('rm -rf "$libs"')
 unzip -q -o "$apk" 'lib/arm64-v8a/*.so' -d "$libs"
-if strings "$libs"/lib/arm64-v8a/*.so | grep -qE 'download\.readest\.com/releases|github\.com/readest/readest/releases'; then
+if [[ "$(strings "$libs"/lib/arm64-v8a/*.so | grep -cE 'download\.readest\.com/releases|github\.com/readest/readest/releases')" -gt 0 ]]; then
   die "updater endpoints still compiled into the native library"
 fi
 

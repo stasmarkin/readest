@@ -13,6 +13,12 @@ vm_dir="$(colima ssh -- sh -c 'echo $HOME')/readest-stand"
 cmd="${1:?usage: stand.sh up|down}"
 
 vm() { colima ssh -- bash -c "$1"; }
+# The stand is the compose project "readest" in the default colima VM; never touch one that lives elsewhere.
+owner="$(vm "docker ps -a --filter label=com.docker.compose.project=readest --format '{{index .Labels \"com.docker.compose.project.working_dir\"}}' | sort -u")"
+if [[ -n "$owner" && "$owner" != "$vm_dir" ]]; then
+  echo "stand: compose project 'readest' in this VM belongs to $owner, not the stand; refusing" >&2
+  exit 1
+fi
 compose="docker compose --project-directory $vm_dir --env-file $vm_dir/.env -f $vm_dir/compose.yaml -f $vm_dir/compose.override.yaml -f $vm_dir/compose.colima.yaml"
 
 case "$cmd" in
@@ -30,9 +36,7 @@ case "$cmd" in
     prod_image="$(ssh "${ssh_opts[@]}" coolify "grep -E '^READEST_IMAGE=' /opt/readest/.env | cut -d= -f2-")"
     [[ -n "$prod_image" ]] || { echo "stand: no READEST_IMAGE in the production .env" >&2; exit 1; }
     want_migrations="$(find "$stage/volumes/db/migrations" -name '[0-9]*.sql' | wc -l | tr -d ' ')"
-    # The production backup.sh as first imported (no lock), so the deploy's step 0 gets exercised.
-    # shellcheck disable=SC2016 # literal for the script
-    git -C "$root" show b9e67a2dd:selfhost/server/backup.sh | sed 's|DEST=/opt/readest/backups|DEST="$(pwd)/backups"|' >"$stage/backup.sh"
+    cp "$root/selfhost/server/backup.sh" "$stage/backup.sh"
     chmod 700 "$stage/backup.sh"
     cp "$root/selfhost/server/compose.override.yaml" "$root/selfhost/server/compose.colima.yaml" "$stage/"
     # shellcheck disable=SC1090
