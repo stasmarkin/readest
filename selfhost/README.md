@@ -7,7 +7,7 @@ Fork-only rails that point Readest at our own server (`https://readest.stasmarki
 | What | Command | Result |
 |---|---|---|
 | macOS | `bash selfhost/build-macos.sh` | `target/release/bundle/macos/Readest Selfhost.app` (`com.readest.selfhost`) |
-| Android | `bash selfhost/build-android.sh` | `~/Downloads/readest-selfhost-<version>-<sha>.apk` (`com.readest.selfhost`, arm64) |
+| Android | `bash selfhost/build-android.sh` | `~/Downloads/readest-selfhost-<version>-<sha>.apk` (`com.readest.selfhost`, arm64; localhost test builds go to `~/.config/readest-selfhost/test/`) |
 
 - The server address and anon key are baked in at build time from `https://readest.stasmarkin.ru/.well-known/readest-client-config.json` (`READEST_SELFHOST_URL` overrides the host). For a test build set all three of `READEST_SELFHOST_API_URL`, `READEST_SELFHOST_SUPABASE_URL`, `READEST_SELFHOST_ANON_KEY`; no network is needed then.
 - `build-env.sh` refuses to build if `apps/readest-app/.env.local` or `.env` sets `SENTRY_DSN` or `NEXT_PUBLIC_POSTHOG_KEY`.

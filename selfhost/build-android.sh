@@ -71,6 +71,14 @@ ks_props="$gen/keystore.properties"
 (umask 077 && printf 'keyAlias=readest-selfhost\npassword=%s\nstoreFile=%s\n' "$password" "$jks" >"$ks_props")
 git -C "$root" check-ignore -q "$ks_props" || die "$ks_props is not git-ignored"
 
+# The deep-link plugin rewrites the tracked AndroidManifest.xml from our config; put it back so a
+# build leaves the checkout clean (fork sync/rebuild refuse dirty trees).
+manifest="$gen/app/src/main/AndroidManifest.xml"
+restore_manifest=0
+if [[ -z "$(git -C "$root" status --porcelain -- "$manifest")" ]]; then
+  restore_manifest=1
+  trap 'git -C "$root" checkout -- "$manifest"' EXIT
+fi
 (cd "$app_dir" && READEST_APPLICATION_ID="$application_id" \
   pnpm tauri android build --apk --target aarch64 --config "$here/tauri.android.conf.json")
 
@@ -86,7 +94,11 @@ if "$build_tools/aapt" dump xmltree "$apk" AndroidManifest.xml | grep -q 'web\.r
 fi
 bash "$here/bundle-smoke.sh" "$app_dir/out"
 libs="$(mktemp -d)"
-trap 'rm -rf "$libs"' EXIT
+if [[ $restore_manifest -eq 1 ]]; then
+  trap 'rm -rf "$libs"; git -C "$root" checkout -- "$manifest"' EXIT
+else
+  trap 'rm -rf "$libs"' EXIT
+fi
 unzip -q -o "$apk" 'lib/arm64-v8a/*.so' -d "$libs"
 if strings "$libs"/lib/arm64-v8a/*.so | grep -qE 'download\.readest\.com/releases|github\.com/readest/readest/releases'; then
   die "updater endpoints still compiled into the native library"
@@ -95,6 +107,11 @@ fi
 version="$(node -p 'require(process.argv[1]).version' "$app_dir/package.json")"
 sha="$(git -C "$root" rev-parse --short=7 HEAD)"
 dest="$HOME/Downloads/readest-selfhost-$version-$sha.apk"
+# Test builds for the colima stand must not look like a real release in ~/Downloads.
+if [[ "$NEXT_PUBLIC_API_BASE_URL" == http://localhost:* ]]; then
+  mkdir -p "$key_dir/test"
+  dest="$key_dir/test/readest-selfhost-localhost-$version-$sha.apk"
+fi
 cp "$apk" "$dest"
 echo "build-android: OK $dest"
 
