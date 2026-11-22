@@ -17,7 +17,7 @@ compose="docker compose --project-directory $vm_dir --env-file $vm_dir/.env -f $
 
 case "$cmd" in
   down)
-    vm "[ -d $vm_dir ] && $compose down -v --remove-orphans || true; rm -rf $vm_dir"
+    vm "[ -d $vm_dir ] && $compose down -v --remove-orphans || true; sudo rm -rf $vm_dir"
     echo "stand: removed $vm_dir"
     ;;
   up)
@@ -51,7 +51,7 @@ case "$cmd" in
     find "$stage" -name '._*' -delete
     vm "docker network inspect coolify >/dev/null 2>&1 || docker network create coolify >/dev/null
       [ -d $vm_dir ] && $compose down -v --remove-orphans >/dev/null 2>&1 || true
-      rm -rf $vm_dir && mkdir -p $vm_dir && cp -a $stage/. $vm_dir/ && chmod 600 $vm_dir/.env
+      sudo rm -rf $vm_dir && mkdir -p $vm_dir && cp -a $stage/. $vm_dir/ && chmod 600 $vm_dir/.env
       $compose up -d"
     for _ in $(seq 1 60); do
       if vm "docker exec supabase-db psql -U postgres -tAc 'select count(*) from readest_meta.migrations'" 2>/dev/null | grep -qx 17; then
