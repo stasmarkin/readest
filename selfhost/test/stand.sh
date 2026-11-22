@@ -12,7 +12,7 @@ secrets="${READEST_STAND_SECRETS:-$HOME/.local/state/readest-selfhost/stand.env}
 vm_dir="$(colima ssh -- sh -c 'echo $HOME')/readest-stand"
 cmd="${1:?usage: stand.sh up|down}"
 
-vm() { colima ssh -- bash -c "$1"; }
+vm() { colima ssh -- bash -o pipefail -c "$1"; }
 # The stand is the compose project "readest" in the default colima VM. Its containers and volumes
 # may only be touched when they are the stand's: containers started from the stand dir, and volumes
 # only while the stand marker exists (a stopped foreign project leaves volumes without containers).
@@ -73,7 +73,7 @@ case "$cmd" in
     vm "docker network inspect coolify >/dev/null 2>&1 || docker network create coolify >/dev/null
       [ -d $vm_dir ] && $compose down -v --remove-orphans >/dev/null 2>&1 || true
       sudo rm -rf $vm_dir && mkdir -p $vm_dir && cp -a $stage/. $vm_dir/ && chmod 600 $vm_dir/.env
-      $compose up -d && $vol_ids >$marker"
+      $compose up -d; rc=\$?; $vol_ids >$marker; exit \$rc"
     for _ in $(seq 1 60); do
       if vm "docker exec supabase-db psql -U postgres -tAc 'select count(*) from readest_meta.migrations'" 2>/dev/null | grep -qx "$want_migrations"; then
         echo "stand: up at $vm_dir on $prod_image, $want_migrations migrations applied"

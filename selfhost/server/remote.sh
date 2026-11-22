@@ -296,7 +296,10 @@ snapshot_failed() {
     if [[ "$running_public" == 1 ]]; then
       dc up -d --pull never >&2 && return 0
     else
-      dc stop kong client minio >&2 && { log "stack left closed: kong, client and minio stopped"; return 0; }
+      # Containers may already be gone (the failure came after `down`): recreate closed, keep the
+      # database up for the next --deploy, and stop what faces the public.
+      dc maint up -d --pull never >&2 && dc stop kong client minio >&2 &&
+        { log "stack left closed: database up, kong, client and minio stopped"; return 0; }
     fi
   fi
   if [[ -n "$running" ]]; then
@@ -453,6 +456,7 @@ rotate() {
   local kind_prefix
   for kind_prefix in rollback failed; do
     find "$dir/backups" -maxdepth 1 -type d -name "$kind_prefix-*" | sort -r | tail -n +4 | while read -r snap; do
+      [[ " ${keep[*]} " == *" $snap "* ]] && continue
       rm -rf "$snap"
       log "removed old snapshot $snap"
     done
