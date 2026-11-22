@@ -34,7 +34,10 @@ if [[ "$mode" == rollback && $accept_loss -ne 1 ]]; then
   log "rollback to $arg loses every write made after that snapshot; repeat with --accept-loss"
   exit 2
 fi
-[[ -d "$dir" && -f "$dir/.env" && -f "$dir/compose.yaml" ]] || die "$dir is not a Readest stack"
+# A rollback must work even when a failed deploy left <dir> half-written.
+if [[ "$mode" != rollback ]]; then
+  [[ -d "$dir" && -f "$dir/.env" && -f "$dir/compose.yaml" ]] || die "$dir is not a Readest stack"
+fi
 
 # Compose for the files currently in <dir>; "maint" adds the maintenance overlay last.
 dc() {
@@ -54,7 +57,7 @@ projection() {
   python3 -c '
 import json, sys
 c = json.load(sys.stdin)
-out = {"volumes": sorted((c.get("volumes") or {}).keys()), "networks": sorted((c.get("networks") or {}).keys()), "services": {}}
+out = {"volumes": sorted(k + "=" + str((v or {}).get("name")) for k, v in (c.get("volumes") or {}).items()), "project": c.get("name"), "networks": sorted((c.get("networks") or {}).keys()), "services": {}}
 for name, s in sorted(c["services"].items()):
     labels = s.get("labels") or {}
     out["services"][name] = {
@@ -153,6 +156,10 @@ step1_checks() {
   local pending
   pending="$(comm -23 <(find "$new_tree/volumes/db/migrations" -name '[0-9]*.sql' -exec basename {} \; | sort) <(applied_migrations | sort))"
   log "migrations to apply: $(echo "$pending" | grep -c . || true)"
+  # 029 adds CHECK (file_size >= 0); an old negative row would abort it mid-deploy.
+  local negative
+  negative="$(docker exec supabase-db psql -U postgres -tAc 'select count(*) from public.files where file_size < 0' 2>/dev/null | tr -d '[:space:]')"
+  [[ -z "$negative" || "$negative" == 0 ]] || die "$negative files rows have a negative file_size; fix them before migration 029"
   if [[ -n "$pending" ]]; then while read -r m; do echo "  $m" >&2; done <<<"$pending"; fi
   check_space
 }
@@ -190,21 +197,28 @@ snapshot() {
   snap="$dir/backups/$prefix-$ts"
   mkdir -p "$dir/backups"
   mkdir -m 700 "$snap"
-  {
-    local cid svc img id digest
-    for cid in $(docker ps -aq --filter "label=com.docker.compose.project=$project"); do
-      svc="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$cid")"
-      img="$(docker inspect -f '{{.Config.Image}}' "$cid")"
-      id="$(docker inspect -f '{{.Image}}' "$cid")"
-      digest="$(docker image inspect -f '{{range .RepoDigests}}{{.}} {{end}}' "$id" | awk '{print $1}')"
-      if [[ -z "$digest" ]]; then
-        mkdir -p "$snap/images"
-        docker save -o "$snap/images/$svc.tar" "$id"
-        digest="-"
+  # Called inside $(...) || ..., where errexit is off: every step checks its own status.
+  local cids cid svc img id digest
+  cids="$(docker ps -aq --filter "label=com.docker.compose.project=$project")" || { snapshot_failed "$snap"; return 1; }
+  [[ -n "$cids" ]] || { log "no containers of project $project"; snapshot_failed "$snap"; return 1; }
+  : >"$snap/images.tsv"
+  for cid in $cids; do
+    if ! { svc="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$cid")" &&
+      img="$(docker inspect -f '{{.Config.Image}}' "$cid")" &&
+      id="$(docker inspect -f '{{.Image}}' "$cid")" &&
+      digest="$(docker image inspect -f '{{range .RepoDigests}}{{.}} {{end}}' "$id" | awk '{print $1}')"; }; then
+      snapshot_failed "$snap"
+      return 1
+    fi
+    if [[ -z "$digest" ]]; then
+      if ! { mkdir -p "$snap/images" && docker save -o "$snap/images/$svc.tar" "$id"; }; then
+        snapshot_failed "$snap"
+        return 1
       fi
-      printf '%s\t%s\t%s\t%s\n' "$svc" "$img" "$id" "$digest"
-    done
-  } >"$snap/images.tsv" || { snapshot_failed "$snap"; return 1; }
+      digest="-"
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$svc" "$img" "$id" "$digest" >>"$snap/images.tsv" || { snapshot_failed "$snap"; return 1; }
+  done
   READEST_OPS_LOCKED=1 "$dir/backup.sh" >&2 || { snapshot_failed "$snap"; return 1; }
   dc down >&2 || { snapshot_failed "$snap"; return 1; }
   tar -C "$dir" --exclude=./backups --exclude=./.ops.lock -czf "$snap/config.tgz" . || { snapshot_failed "$snap"; return 1; }
@@ -215,7 +229,8 @@ snapshot() {
   fi
   local vol
   for vol in db-data minio-data; do
-    docker run --rm -v "${project}_$vol:/v:ro" -v "$snap:/s" alpine tar -C /v -cf "/s/$vol.tar" . || { snapshot_failed "$snap"; return 1; }
+    docker run --rm -v "${project}_$vol:/v:ro" -v "$snap:/s" alpine sh -c "tar -C /v -cf /s/$vol.tar . && tar -tf /s/$vol.tar >/dev/null" ||
+      { snapshot_failed "$snap"; return 1; }
   done
   log "snapshot $snap"
   echo "$snap"
@@ -268,7 +283,15 @@ restore() {
   local snap="$1"
   [[ -f "$snap/config.tgz" && -f "$snap/db-data.tar" && -f "$snap/minio-data.tar" ]] || die "$snap is incomplete"
   log "restoring $snap"
-  dc down >&2 || true
+  if [[ -f "$dir/compose.yaml" && -f "$dir/.env" ]]; then dc down >&2 || true; fi
+  # Volumes are wiped below: nothing of the project may still be running, whatever config is on disk.
+  local running
+  running="$(docker ps -q --filter "label=com.docker.compose.project=$project")"
+  if [[ -n "$running" ]]; then
+    # shellcheck disable=SC2086
+    docker stop $running >&2 || die "cannot stop the running stack; nothing restored"
+  fi
+  [[ -z "$(docker ps -q --filter "label=com.docker.compose.project=$project")" ]] || die "stack still running; nothing restored"
   find "$dir" -mindepth 1 -maxdepth 1 ! -name backups ! -name .ops.lock ! -name backup.sh -exec rm -rf {} +
   tar -C "$dir" --exclude=./backup.sh -xzf "$snap/config.tgz"
   local svc img id digest
@@ -326,10 +349,8 @@ case "$mode" in
     step1_checks "$arg"
     snap="$(snapshot deploy)" || exit 1
     log "step 3: install files, pull, migrate (closed)"
-    find "$dir" -mindepth 1 -maxdepth 1 ! -name backups ! -name .ops.lock ! -name wellknown -exec rm -rf {} +
-    cp -a "$new_tree/." "$dir/"
-    rm -rf "$new_tree"
-    if ! { dc maint pull >&2 && dc maint up -d >&2 && wait_db maint &&
+    if ! { find "$dir" -mindepth 1 -maxdepth 1 ! -name backups ! -name .ops.lock ! -name wellknown -exec rm -rf {} + &&
+      cp -a "$new_tree/." "$dir/" && rm -rf "$new_tree" && dc maint pull >&2 && dc maint up -d >&2 && wait_db maint &&
       dc maint exec -T db /docker-entrypoint-initdb.d/zz-readest-migrations.sh >&2 &&
       dc maint exec -T db psql -U postgres -c "NOTIFY pgrst, 'reload schema'" >&2; }; then
       log "step 3 failed; rolling back"
@@ -350,7 +371,7 @@ case "$mode" in
       exit 1
     fi
     dc up -d >&2
-    if ! probe_open; then
+    if ! { probe_open && smoke --public "$(envval SITE_URL)"; }; then
       dc maint up -d >&2
       die "stack is up but not reachable from outside; closed again. Writes are open since the switch — inspect, then: deploy.sh --rollback $(basename "$snap" | sed 's/^deploy-//') --accept-loss"
     fi

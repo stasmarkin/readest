@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # Read-only smoke test of a Readest stack from inside its network (works while Traefik routes are off):
-#   smoke.sh <dir> [--expect-file <file_key> --expect-sha256 <hex>] [--force-fail]
-# Auth health, a short-lived JWT for the first user (signed here; the secret never leaves the host),
-# /api/storage/list, then a presigned download of up to 50 listed files (or of the expected one).
+#   smoke.sh <dir> [--expect-file <file_key> --expect-sha256 <hex>] [--force-fail] [--public <https-origin>]
+# Auth health, a short-lived JWT for the user with the most files (signed here; the secret never
+# leaves the host), /api/storage/list, then a presigned download of up to 50 listed files (or of the
+# expected one). --public runs the same checks through the public origin instead of the stack network.
 set -euo pipefail
 dir="${1:?usage: smoke.sh <dir> [...]}"
 shift
-expect_key="" expect_sha="" force_fail=0
+expect_key="" expect_sha="" force_fail=0 public=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --expect-file) expect_key="$2"; shift 2 ;;
     --expect-sha256) expect_sha="$2"; shift 2 ;;
     --force-fail) force_fail=1; shift ;;
+    --public) public="$2"; shift 2 ;;
     *) echo "smoke: unknown arg $1" >&2; exit 2 ;;
   esac
 done
@@ -24,19 +26,25 @@ kong="$(container kong)"
 client="$(container client)"
 minio="$(container minio)"
 [[ -n "$kong" && -n "$client" && -n "$minio" ]] || { echo "smoke: kong/client/minio not running" >&2; exit 1; }
-user_id="$(docker exec supabase-db psql -U postgres -tAc 'select id from auth.users order by created_at limit 1' | tr -d '[:space:]')"
-[[ -n "$user_id" ]] || { echo "smoke: no users" >&2; exit 1; }
+# The user with the most live files, so an empty account can't fail a healthy stack.
+user_id="$(docker exec supabase-db psql -U postgres -tAc "select coalesce((select user_id::text from public.files where deleted_at is null group by user_id order by count(*) desc limit 1), (select id::text from auth.users order by created_at limit 1))" | tr -d '[:space:]')"
+files_in_db="$(docker exec supabase-db psql -U postgres -tAc "select count(*) from public.files where deleted_at is null and user_id::text = '$user_id'" | tr -d '[:space:]')"
 
 # Secrets go through a 600 env file, not argv, so they stay out of the process list.
 envfile="$(mktemp)"
 trap 'rm -f "$envfile"' EXIT
-printf 'JWT_SECRET=%s\nANON_KEY=%s\nUSER_ID=%s\nKONG=%s\nCLIENT=%s\nMINIO=%s\nEXPECT_KEY=%s\nEXPECT_SHA=%s\n' \
-  "$(envval JWT_SECRET)" "$(envval ANON_KEY)" "$user_id" "$kong:8000" "$client:3000" "$minio:9000" \
-  "$expect_key" "$expect_sha" >"$envfile"
-docker run --rm -i --network readest_default --env-file "$envfile" node:24-alpine node - <<'JS'
+if [[ -n "$public" ]]; then
+  kong_url="$public" client_url="$public" network=()
+else
+  kong_url="http://$kong:8000" client_url="http://$client:3000" network=(--network readest_default)
+fi
+printf 'JWT_SECRET=%s\nANON_KEY=%s\nUSER_ID=%s\nFILES_IN_DB=%s\nKONG=%s\nCLIENT=%s\nMINIO=%s\nPUBLIC=%s\nEXPECT_KEY=%s\nEXPECT_SHA=%s\n' \
+  "$(envval JWT_SECRET)" "$(envval ANON_KEY)" "$user_id" "${files_in_db:-0}" "$kong_url" "$client_url" "$minio:9000" \
+  "$public" "$expect_key" "$expect_sha" >"$envfile"
+docker run --rm -i "${network[@]}" --env-file "$envfile" node:24-alpine node - <<'JS'
 const crypto = require('crypto');
 const http = require('http');
-const { JWT_SECRET, ANON_KEY, USER_ID, KONG, CLIENT, MINIO, EXPECT_KEY, EXPECT_SHA } = process.env;
+const { JWT_SECRET, ANON_KEY, USER_ID, FILES_IN_DB, KONG, CLIENT, MINIO, PUBLIC, EXPECT_KEY, EXPECT_SHA } = process.env;
 const deadline = Date.now() + 120_000;
 const fail = (m) => { console.error('smoke: FAIL ' + m); process.exit(1); };
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
@@ -55,7 +63,10 @@ const retry = async (what, fn) => {
 };
 // fetch() rewrites Host to the URL's host, which breaks the SigV4 signature of a presigned URL;
 // node:http keeps the signed Host while connecting to MinIO inside the network.
-const download = (signed) => new Promise((resolve, reject) => {
+const download = (signed) => PUBLIC ? fetch(signed).then(async (r) => {
+  const buf = Buffer.from(await r.arrayBuffer());
+  return { status: r.status, size: buf.length, sha: crypto.createHash('sha256').update(buf).digest('hex') };
+}) : new Promise((resolve, reject) => {
   const u = new URL(signed);
   const [host, port] = MINIO.split(':');
   const req = http.request({ host, port, path: u.pathname + u.search, headers: { Host: u.host } }, (res) => {
@@ -70,21 +81,25 @@ const download = (signed) => new Promise((resolve, reject) => {
 
 (async () => {
   await retry('auth health', async () => {
-    const r = await fetch(`http://${KONG}/auth/v1/health`, { headers: { apikey: ANON_KEY } });
+    const r = await fetch(`${KONG}/auth/v1/health`, { headers: { apikey: ANON_KEY } });
     if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
   });
+  if (!USER_ID) { console.error('smoke: OK (no users yet; auth only)'); process.exit(0); }
   const auth = { Authorization: `Bearer ${jwt}` };
   const list = await retry('storage list', async () => {
-    const r = await fetch(`http://${CLIENT}/api/storage/list?pageSize=50`, { headers: auth });
+    const r = await fetch(`${CLIENT}/api/storage/list?pageSize=50`, { headers: auth });
     if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
     if (!Array.isArray(j.files)) throw new Error('no files array');
     return j.files;
   });
-  if (list.length === 0) fail('storage list is empty');
+  if (list.length === 0) {
+    if (Number(FILES_IN_DB) === 0 && !EXPECT_KEY) { console.error('smoke: OK (no files yet; auth and list only)'); process.exit(0); }
+    fail('storage list is empty');
+  }
   const keys = EXPECT_KEY ? [EXPECT_KEY] : list.map((f) => f.file_key);
   for (const key of keys.slice(0, 50)) {
-    const r = await fetch(`http://${CLIENT}/api/storage/download?fileKey=${encodeURIComponent(key)}`, { headers: auth });
+    const r = await fetch(`${CLIENT}/api/storage/download?fileKey=${encodeURIComponent(key)}`, { headers: auth });
     if (r.status !== 200) { if (EXPECT_KEY) fail(`download url for expected file: HTTP ${r.status}`); continue; }
     const { downloadUrl } = await r.json();
     const d = await download(downloadUrl);

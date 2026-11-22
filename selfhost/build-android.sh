@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # cleanup_cmds are single-quoted on purpose and expanded by eval on exit
 # Builds a signed arm64 "Readest Selfhost" APK (com.readest.selfhost) for the server from build-env.sh
 # and copies it to ~/Downloads. Run from anywhere:
 #   bash selfhost/build-android.sh
@@ -66,18 +67,30 @@ fi
 password="$(grep -E '^password=' "$props" | cut -d= -f2-)"
 [[ -n "$password" ]] || die "no password in $props"
 
+# Everything this script changes in the checkout is put back on exit.
+cleanup_cmds=()
+cleanup() {
+  local c
+  for c in "${cleanup_cmds[@]+"${cleanup_cmds[@]}"}"; do eval "$c" || true; done
+}
+trap cleanup EXIT
+
+# keystore.properties may hold the regular release signing config (or link to it); park it.
 ks_props="$gen/keystore.properties"
-[[ -L "$ks_props" ]] && rm "$ks_props"
+if [[ -e "$ks_props" || -L "$ks_props" ]]; then
+  mv "$ks_props" "$ks_props.before-selfhost"
+  cleanup_cmds+=('rm -f "$ks_props"; mv "$ks_props.before-selfhost" "$ks_props"')
+else
+  cleanup_cmds+=('rm -f "$ks_props"')
+fi
 (umask 077 && printf 'keyAlias=readest-selfhost\npassword=%s\nstoreFile=%s\n' "$password" "$jks" >"$ks_props")
 git -C "$root" check-ignore -q "$ks_props" || die "$ks_props is not git-ignored"
 
 # The deep-link plugin rewrites the tracked AndroidManifest.xml from our config; put it back so a
 # build leaves the checkout clean (fork sync/rebuild refuse dirty trees).
 manifest="$gen/app/src/main/AndroidManifest.xml"
-restore_manifest=0
 if [[ -z "$(git -C "$root" status --porcelain -- "$manifest")" ]]; then
-  restore_manifest=1
-  trap 'git -C "$root" checkout -- "$manifest"' EXIT
+  cleanup_cmds+=('git -C "$root" checkout -- "$manifest"')
 fi
 (cd "$app_dir" && READEST_APPLICATION_ID="$application_id" \
   pnpm tauri android build --apk --target aarch64 --config "$here/tauri.android.conf.json")
@@ -94,11 +107,7 @@ if "$build_tools/aapt" dump xmltree "$apk" AndroidManifest.xml | grep -q 'web\.r
 fi
 bash "$here/bundle-smoke.sh" "$app_dir/out"
 libs="$(mktemp -d)"
-if [[ $restore_manifest -eq 1 ]]; then
-  trap 'rm -rf "$libs"; git -C "$root" checkout -- "$manifest"' EXIT
-else
-  trap 'rm -rf "$libs"' EXIT
-fi
+cleanup_cmds+=('rm -rf "$libs"')
 unzip -q -o "$apk" 'lib/arm64-v8a/*.so' -d "$libs"
 if strings "$libs"/lib/arm64-v8a/*.so | grep -qE 'download\.readest\.com/releases|github\.com/readest/readest/releases'; then
   die "updater endpoints still compiled into the native library"
