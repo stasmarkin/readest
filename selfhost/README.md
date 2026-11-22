@@ -26,11 +26,13 @@ bash selfhost/server/deploy.sh --rollback <ts> --accept-loss
 
 - Image `sha-<merge-base(HEAD, upstream/main)>` and `docker/` come from the same upstream commit; `server/` from HEAD (commit before deploying).
 - A deploy is a cold snapshot: the stack goes down (minutes of downtime, clients retry), configs, image digests and both volumes go to `backups/deploy-<ts>/`, files are replaced, migrations run with Traefik routes off, the smoke test downloads a book from inside the network, then routes open. Any failure before opening restores the snapshot automatically. A failure after opening only closes the routes again and prints the rollback command.
+- Public routes appear only after Traefik sees the containers healthy (kong: ~10 s), so the deploy polls them for up to `READEST_PROBE_TIMEOUT` seconds (default 90).
+- Once public-facing services are up in maintenance, a failure stops kong, client and minio and leaves the database up — no rollback over writes they may have taken; run `--deploy` again or `--rollback`. A closed stack stays closed through a failed snapshot.
 - `--rollback` restores both volumes from the snapshot, so writes made after it are lost; it saves the current state to `backups/rollback-<ts>/` first.
 - Kong's upstreams are rewritten to `supabase-auth`/`supabase-rest`: on the shared `coolify` network bare service names can resolve to other projects' containers.
 - `backup.sh` (cron 04:30) and deploys share `.ops.lock`. The first deploy installs the locking `backup.sh` and refuses to run 04:20–04:40.
 - Snapshots kept: the last three `deploy-*` plus the latest one of the previous client version.
-- Test stand: `bash selfhost/test/stand.sh up` mirrors the production layout on colima (clients on `localhost:3000/8000/9000`, emulator via `adb reverse`), then `deploy.sh --target colima:<dir>`; `--test-fail-smoke` / `--test-fail-snapshot` exercise the rollback paths there only.
+- Test stand: `bash selfhost/test/stand.sh up` mirrors the production layout, image and migrations on colima (it refuses a `readest` project or volumes that aren't its own) (clients on `localhost:3000/8000/9000`, emulator via `adb reverse`), then `deploy.sh --target colima:<dir>`; `--test-fail-smoke` / `--test-fail-snapshot` exercise the rollback paths there only.
 
 ## Network
 
