@@ -1,4 +1,5 @@
 import semver from 'semver';
+import { isSelfHosted } from '@/utils/access';
 import { check } from '@tauri-apps/plugin-updater';
 import { type as osType, arch as osArch } from '@tauri-apps/plugin-os';
 import { fetch } from '@tauri-apps/plugin-http';
@@ -224,7 +225,8 @@ export const getLastShownReleaseNotesVersion = () => {
 };
 
 export const checkAppReleaseNotes = async (isAutoCheck = true) => {
-  if (process.env['NEXT_PUBLIC_DISABLE_UPDATER']) return false;
+  // Release notes live on Readest's download server; a self-hosted build never calls it.
+  if (isSelfHosted()) return false;
   const currentVersion = getAppVersion();
   const lastShownVersion = getLastShownReleaseNotesVersion();
   if ((lastShownVersion && semver.gt(currentVersion, lastShownVersion)) || !isAutoCheck) {

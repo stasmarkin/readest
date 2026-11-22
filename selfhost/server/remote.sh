@@ -371,7 +371,7 @@ case "$mode" in
       exit 1
     fi
     dc up -d >&2
-    if ! { probe_open && smoke --public "$(envval SITE_URL)"; }; then
+    if ! { probe_open && { [[ $colima -eq 1 ]] || smoke --public "$(envval SITE_URL)"; }; }; then
       dc maint up -d >&2
       die "stack is up but not reachable from outside; closed again. Writes are open since the switch — inspect, then: deploy.sh --rollback $(basename "$snap" | sed 's/^deploy-//') --accept-loss"
     fi

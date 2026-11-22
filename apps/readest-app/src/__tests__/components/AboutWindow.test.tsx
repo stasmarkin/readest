@@ -267,14 +267,14 @@ describe('AboutWindow check update error auto-revert', () => {
   });
 });
 
-describe('AboutWindow with the updater disabled at build time', () => {
+describe('AboutWindow in a self-hosted build', () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllEnvs();
   });
 
   it('hides the update check and recent updates button', async () => {
-    vi.stubEnv('NEXT_PUBLIC_DISABLE_UPDATER', '1');
+    vi.stubEnv('NEXT_PUBLIC_SELF_HOSTED', 'true');
     await openDialog();
 
     expect(screen.queryByRole('button', { name: 'Check Update' })).toBeNull();
