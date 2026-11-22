@@ -234,6 +234,40 @@ describe.skipIf(!pandocVersion)(
       expect(r.title).toBe('T _x_');
     });
 
+    it('an iframe becomes a link to its src: pandoc must not fetch it', async () => {
+      const s = await setup();
+      const md = [
+        'До',
+        '',
+        '<iframe allowfullscreen="true" src="https://video.test/player?a=1&amp;b=2" width="315"></iframe>',
+        '',
+        'После',
+      ].join('\n');
+      const doc = await parseBody(s.deps, md);
+      expect(nodesOf(doc, 'Link').map(urlOf)).toEqual(['https://video.test/player?a=1&b=2']);
+      const other = await parseBody(
+        s.deps,
+        [
+          '<div>a <!-- <iframe> --> b <iframe src="//v.test/x"></iframe> c',
+          '<iframe><a href="https://v.test/fb">запасная</a></iframe> d',
+          '<iframe><iframe src="https://v.test/in">x</iframe></iframe> e',
+          '<iframe src="https://v.test/open"> f</div>',
+        ].join('\n'),
+      );
+      expect(nodesOf(other, 'Link').map(urlOf)).toEqual([
+        'https://v.test/x',
+        'https://v.test/fb',
+        'https://v.test/in',
+        'https://v.test/open',
+      ]);
+      expect(strs(other)).toEqual(
+        expect.arrayContaining(['a', 'b', 'c', 'запасная', 'd', 'e', 'f']),
+      );
+      expect(strs(doc)).toEqual(
+        expect.arrayContaining(['До', '[встроенное', 'содержимое]', 'После']),
+      );
+    });
+
     it('pandoc reporting a fetch is an error of the file', async () => {
       const s = await setup({
         run: async (c, a, o) => {

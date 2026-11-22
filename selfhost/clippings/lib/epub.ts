@@ -72,6 +72,22 @@ const attr = (tag: string, name: string): string | undefined => {
   return v?.replace(/&amp;/g, '&');
 };
 
+const escapeAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
+/** The HTML reader fetches an iframe's src to inline its page: a link instead, or its fallback content. */
+const iframesToLinks = (html: string): string =>
+  html
+    // Dropped by the reader anyway; a literal <iframe> in one must not open a match.
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<iframe\b[^>]*>(?:([\s\S]*?)<\/iframe\s*>)?/gi, (tag, inner?: string) => {
+      const src = attr(tag.slice(0, tag.indexOf('>') + 1), 'src')
+        ?.trim()
+        .replace(/^\/\//, 'https://');
+      return src && /^https?:\/\//i.test(src)
+        ? `<a href="${escapeAttr(src)}">[встроенное содержимое]</a>`
+        : iframesToLinks(inner ?? '');
+    });
+
 const imageNode = (src: string, alt = ''): Node => ({
   t: 'Image',
   c: [['', [], []], alt ? [{ t: 'Str', c: alt }] : [], [src, '']],
@@ -117,7 +133,9 @@ export const parseBody = async (deps: SyncDeps, body: string): Promise<PandocDoc
   for (const html of htmlBlocks.keys()) {
     htmlBlocks.set(
       html,
-      parseDoc(await pandoc(deps, ['--from', 'html-raw_html', '--to', 'json'], html)).blocks,
+      parseDoc(
+        await pandoc(deps, ['--from', 'html-raw_html', '--to', 'json'], iframesToLinks(html)),
+      ).blocks,
     );
   }
   doc.blocks = flatMapNodes(doc.blocks, (n) => {
