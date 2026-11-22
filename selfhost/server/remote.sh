@@ -298,8 +298,8 @@ snapshot_failed() {
     else
       # Containers may already be gone (the failure came after `down`): recreate closed, keep the
       # database up for the next --deploy, and stop what faces the public.
-      dc maint up -d --pull never >&2 && dc stop kong client minio >&2 &&
-        { log "stack left closed: database up, kong, client and minio stopped"; return 0; }
+      dc maint up -d --pull never >&2 || true
+      dc stop kong client minio >&2 && { log "stack left closed: database up, kong, client and minio stopped"; return 0; }
     fi
   fi
   if [[ -n "$running" ]]; then
