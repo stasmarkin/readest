@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds a colima test stand that mirrors the production stack as it is today (compose.yaml and
 # volumes/ copied read-only from coolify:/opt/readest), with test secrets and empty volumes:
-#   bash selfhost/test/stand.sh up      # fresh stand on the production layout (migrations 001-017)
+#   bash selfhost/test/stand.sh up      # fresh stand on the production layout, image and migrations
 #   bash selfhost/test/stand.sh down    # remove containers and volumes
 # Stand dir inside the VM: /home/<user>.linux/readest-stand; clients reach it on localhost:3000/8000/9000.
 set -euo pipefail
@@ -26,6 +26,10 @@ case "$cmd" in
     trap 'rm -rf "$stage"' EXIT
     ssh_opts=(-o RemoteCommand=none -o RequestTTY=no)
     ssh "${ssh_opts[@]}" coolify 'tar -C /opt/readest -cf - compose.yaml volumes wellknown.conf' | tar -x -C "$stage"
+    # Only the image line of the production .env; its secrets stay on the server.
+    prod_image="$(ssh "${ssh_opts[@]}" coolify "grep -E '^READEST_IMAGE=' /opt/readest/.env | cut -d= -f2-")"
+    [[ -n "$prod_image" ]] || { echo "stand: no READEST_IMAGE in the production .env" >&2; exit 1; }
+    want_migrations="$(find "$stage/volumes/db/migrations" -name '[0-9]*.sql' | wc -l | tr -d ' ')"
     # The production backup.sh as first imported (no lock), so the deploy's step 0 gets exercised.
     # shellcheck disable=SC2016 # literal for the script
     git -C "$root" show b9e67a2dd:selfhost/server/backup.sh | sed 's|DEST=/opt/readest/backups|DEST="$(pwd)/backups"|' >"$stage/backup.sh"
@@ -36,7 +40,7 @@ case "$cmd" in
     mkdir -p "$stage/wellknown"
     printf '{"apiBaseUrl":"http://localhost:3000","supabaseUrl":"http://localhost:8000","supabaseAnonKey":"%s"}' "$ANON_KEY" >"$stage/wellknown/readest-client-config.json"
     sed -E \
-      -e "s|^READEST_IMAGE=.*|READEST_IMAGE=ghcr.io/readest/readest:0.11.20|" \
+      -e "s|^READEST_IMAGE=.*|READEST_IMAGE=$prod_image|" \
       -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$POSTGRES_PASSWORD|" \
       -e "s|^JWT_SECRET=.*|JWT_SECRET=$JWT_SECRET|" \
       -e "s|^ANON_KEY=.*|ANON_KEY=$ANON_KEY|" \
@@ -54,13 +58,13 @@ case "$cmd" in
       sudo rm -rf $vm_dir && mkdir -p $vm_dir && cp -a $stage/. $vm_dir/ && chmod 600 $vm_dir/.env
       $compose up -d"
     for _ in $(seq 1 60); do
-      if vm "docker exec supabase-db psql -U postgres -tAc 'select count(*) from readest_meta.migrations'" 2>/dev/null | grep -qx 17; then
-        echo "stand: up at $vm_dir, migrations 001-017 applied"
+      if vm "docker exec supabase-db psql -U postgres -tAc 'select count(*) from readest_meta.migrations'" 2>/dev/null | grep -qx "$want_migrations"; then
+        echo "stand: up at $vm_dir on $prod_image, $want_migrations migrations applied"
         exit 0
       fi
       sleep 3
     done
-    echo "stand: migrations did not reach 017" >&2
+    echo "stand: migrations did not reach $want_migrations" >&2
     exit 1
     ;;
   *) echo "usage: stand.sh up|down" >&2; exit 2 ;;
