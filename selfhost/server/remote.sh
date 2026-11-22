@@ -8,6 +8,11 @@
 # rollback restores both, so the database and the bucket always match.
 set -euo pipefail
 
+# READEST_REMOTE_LIB=1: only define the functions; tests source the file with READEST_REMOTE_DIR.
+if [[ "${READEST_REMOTE_LIB:-}" == 1 ]]; then
+  set -- lib "${READEST_REMOTE_DIR:?}" - "${READEST_REMOTE_BUNDLE:-.}"
+  [[ "${READEST_REMOTE_COLIMA:-}" == 1 ]] && set -- "$@" --colima
+fi
 mode="${1:?mode}"
 dir="${2:?dir}"
 arg="${3:?tag or ts}"
@@ -37,7 +42,7 @@ fi
 # A rollback must work even when a failed deploy left <dir> half-written; it only needs the snapshots.
 if [[ "$mode" == rollback ]]; then
   [[ -d "$dir/backups" ]] || die "$dir/backups does not exist"
-else
+elif [[ "$mode" != lib ]]; then
   [[ -d "$dir" && -f "$dir/.env" && -f "$dir/compose.yaml" ]] || die "$dir is not a Readest stack"
 fi
 
@@ -274,9 +279,28 @@ smoke() {
   bash "$srv/smoke.sh" "$dir" "$@"
 }
 
-# Routes are closed when every public path answers with the wellknown nginx 404.
-probe_closed() {
-  [[ $colima -eq 1 ]] && return 0
+# Traefik registers a router only once its container's healthcheck passes (kong: ~10 s after
+# `up -d`) and drops it the same way, so public routes lag behind compose: probes poll until a deadline.
+probe_timeout="${READEST_PROBE_TIMEOUT:-90}"
+probe_interval="${READEST_PROBE_INTERVAL:-3}"
+poll() {
+  local what="$1" deadline=$((SECONDS + probe_timeout))
+  shift
+  until "$@"; do
+    if ((SECONDS >= deadline)); then
+      log "$what: still not there after ${probe_timeout}s"
+      return 1
+    fi
+    sleep "$probe_interval"
+  done
+}
+
+# Closed: every public path answers with the wellknown nginx 404 (colima: the ports are gone).
+closed_once() {
+  if [[ $colima -eq 1 ]]; then
+    if curl -s -o /dev/null --max-time 5 http://localhost:8000/auth/v1/health; then return 1; fi
+    return 0
+  fi
   local host path code body
   host="$(envval SITE_URL)"
   for path in /api/storage/list /auth/v1/health /rest/v1/ /readest-files/; do
@@ -289,22 +313,27 @@ probe_closed() {
     fi
     rm -f "$body"
   done
-  log "public routes closed"
 }
 
-probe_open() {
-  [[ $colima -eq 1 ]] && return 0
+# Open: discovery JSON and auth health answer from outside (colima: through the published kong port).
+open_once() {
   local host anon
-  host="$(envval SITE_URL)"
   anon="$(envval ANON_KEY)"
-  curl -fsS --max-time 15 "$host/.well-known/readest-client-config.json" | python3 -c '
+  if [[ $colima -eq 1 ]]; then
+    curl -fs --max-time 5 -o /dev/null -H "apikey: $anon" http://localhost:8000/auth/v1/health
+    return
+  fi
+  host="$(envval SITE_URL)"
+  curl -fsS --max-time 15 "$host/.well-known/readest-client-config.json" 2>/dev/null | python3 -c '
 import json, sys
 c = json.load(sys.stdin)
 assert all(isinstance(c.get(k), str) and c[k].strip() for k in ("apiBaseUrl", "supabaseUrl", "supabaseAnonKey"))
-' || return 1
-  curl -fsS --max-time 15 -o /dev/null -H "apikey: $anon" "$host/auth/v1/health" || return 1
-  log "public routes open and healthy"
+' 2>/dev/null || return 1
+  curl -fs --max-time 15 -o /dev/null -H "apikey: $anon" "$host/auth/v1/health"
 }
+
+probe_closed() { poll "closing public routes" closed_once && log "public routes closed"; }
+probe_open() { poll "opening public routes" open_once && log "public routes open and healthy"; }
 
 # Stops every running container of the project, whatever config is on disk; fails if Docker can't tell.
 stop_project() {
@@ -386,6 +415,7 @@ rotate() {
 }
 
 case "$mode" in
+  lib) return 0 ;;
   dry-run)
     step1_checks "$arg"
     grep -q 'ops.lock' "$dir/backup.sh" 2>/dev/null || log "step 0 needed: backup.sh will get the shared lock"
