@@ -123,6 +123,38 @@ describe('whoami', () => {
     expect(out).toMatch(/expires.*\d{4}-\d\d-\d\dT/);
   });
 
+  it('--json prints exactly email, userId and server after a server round-trip', async () => {
+    const s = setup();
+    expect(await s.cli('whoami', '--json')).toBe(0);
+    const parsed = JSON.parse(s.stdout()) as Record<string, unknown>;
+    expect(parsed).toEqual({ email: 'me@example.com', userId: UID, server: PROFILE.apiBase });
+    expect(s.out).toHaveLength(1);
+    expect(s.server.apiLog(), 'the session is checked by the server').toEqual(['GET /api/sync']);
+  });
+
+  it('text output also checks the session on the server', async () => {
+    const s = setup();
+    expect(await s.cli('whoami')).toBe(0);
+    expect(s.server.apiLog()).toEqual(['GET /api/sync']);
+  });
+
+  it('--json without a session → 3, empty stdout', async () => {
+    const s = setup({}, { session: false });
+    expect(await s.cli('whoami', '--json')).toBe(3);
+    expect(s.stdout()).toBe('');
+  });
+
+  it('--json with a server-rejected token whose refresh fails → 3, empty stdout', async () => {
+    const s = setup();
+    s.server.setIntercept((c) => {
+      if (c.url.origin === SB) return json(400, { error: 'invalid_grant' });
+      if (c.path === '/api/sync') return json(401, { error: 'Not authenticated' });
+      return undefined;
+    });
+    expect(await s.cli('whoami', '--json')).toBe(3);
+    expect(s.stdout()).toBe('');
+  });
+
   it('works when the foliate-js submodule is missing', async () => {
     const s = setup({ loadCfi: () => Promise.reject(new CliError('no submodule')) });
     expect(await s.cli('whoami')).toBe(0);
@@ -148,6 +180,30 @@ describe('books', () => {
     s.out.length = 0;
     expect(await s.cli('books', '--search', 'dun')).toBe(0);
     expect(s.stdout()).toMatch(/^bbbbbbb .*Dune\n$/);
+  });
+});
+
+describe('--expect-user', () => {
+  it('books --json for another account → 3, empty stdout, nothing read', async () => {
+    const s = setup();
+    s.server.addBook({ book_hash: 'a'.repeat(32), title: 'Solaris' });
+    expect(await s.cli('books', '--json', '--expect-user', 'uid-2')).toBe(3);
+    expect(s.stdout()).toBe('');
+    expect(s.server.calls).toHaveLength(0);
+    expect(await s.cli('books', '--json', '--expect-user', UID)).toBe(0);
+  });
+
+  it('upload --json for another account → 3, empty stdout, nothing written', async () => {
+    const s = setup();
+    expect(await s.cli('upload', epub('Other'), '--json', '--expect-user', 'uid-2')).toBe(3);
+    expect(s.stdout()).toBe('');
+    expect(s.server.calls).toHaveLength(0);
+    expect(s.server.books.size + s.server.files.length).toBe(0);
+  });
+
+  it('an empty --expect-user is a usage error', async () => {
+    const s = setup();
+    expect(await s.cli('books', '--expect-user', '')).toBe(2);
   });
 });
 
@@ -281,6 +337,143 @@ describe('upload', () => {
     expect(await s.cli('upload', '/nonexistent/book.epub', '--json')).toBe(3);
     expect(s.stdout()).toBe('');
     expect(s.stderr()).toContain('login required: run readest login');
+  });
+});
+
+describe('upload --replace', () => {
+  const OLD = 'a'.repeat(32);
+
+  it.each([
+    [['--group', 'G']],
+    [['--dry-run']],
+    [['--allow-duplicate']],
+    [['--resume'], false],
+    [['--expect-meta', '']],
+  ])('%j → 2, empty stdout, no request', async (extra, withReplace = true) => {
+    const s = setup();
+    const argv = [
+      'upload',
+      epub('R'),
+      ...(withReplace ? ['--replace', OLD] : []),
+      ...extra,
+      '--json',
+    ];
+    expect(await s.cli(...argv)).toBe(2);
+    expect(s.stdout()).toBe('');
+    expect(s.server.calls).toHaveLength(0);
+  });
+
+  it('two files or a bad hash → 2', async () => {
+    const s = setup();
+    expect(await s.cli('upload', epub('R1'), epub('R2'), '--replace', OLD, '--json')).toBe(2);
+    expect(await s.cli('upload', epub('R3'), '--replace', 'nothex', '--json')).toBe(2);
+    expect(s.stdout()).toBe('');
+    expect(s.server.calls).toHaveLength(0);
+  });
+
+  it('--json prints one array with the replaced result', async () => {
+    const s = setup();
+    expect(await s.cli('upload', epub('Old one'), '--json')).toBe(0);
+    const [old] = JSON.parse(s.stdout()) as Array<{ hash: string }>;
+    s.out.length = 0;
+    expect(await s.cli('upload', epub('New one'), '--replace', old!.hash, '--json')).toBe(0);
+    expect(JSON.parse(s.stdout())).toEqual([
+      expect.objectContaining({ status: 'replaced', replacedHash: old!.hash, step: 'uploaded' }),
+    ]);
+    expect(s.server.books.get(old!.hash)!.deleted_at).toBeTruthy();
+  });
+
+  it('a failed replace exits 1 with the array', async () => {
+    const s = setup();
+    expect(await s.cli('upload', epub('Lonely'), '--replace', OLD, '--json')).toBe(1);
+    expect(JSON.parse(s.stdout())).toEqual([
+      expect.objectContaining({ status: 'error', reason: 'replace target not found' }),
+    ]);
+  });
+
+  it('--expect-meta reaches a plain upload', async () => {
+    const s = setup();
+    const path = epub('Owned');
+    expect(await s.cli('upload', path, '--json')).toBe(0);
+    const [r] = JSON.parse(s.stdout()) as Array<{ hash: string }>;
+    s.server.books.set(r!.hash, { ...s.server.books.get(r!.hash)!, meta_hash: 'foreign' });
+    s.out.length = 0;
+    expect(await s.cli('upload', path, '--expect-meta', 'mine', '--json')).toBe(1);
+    expect((JSON.parse(s.stdout()) as Array<{ reason: string }>)[0]!.reason).toMatch(/^conflict/);
+  });
+});
+
+describe('delete', () => {
+  const H = 'a'.repeat(32);
+  const seed = (s: ReturnType<typeof setup>) => {
+    s.server.addBook({ book_hash: H, title: 'Gone' });
+    s.server.addFile(`${UID}/Readest/Books/${H}/${H}.epub`, H, new Uint8Array([1]));
+  };
+  const writes = (s: ReturnType<typeof setup>) => s.server.calls.filter((c) => c.method !== 'GET');
+
+  it('--json prints one array and exits 0', async () => {
+    const s = setup();
+    seed(s);
+    expect(await s.cli('delete', H, 'b'.repeat(32), '--json')).toBe(0);
+    expect(JSON.parse(s.stdout())).toEqual([
+      { hash: H, status: 'deleted' },
+      { hash: 'b'.repeat(32), status: 'skipped', reason: 'missing' },
+    ]);
+    expect(s.out).toHaveLength(1);
+    expect(s.server.books.get(H)!.deleted_at).toBeTruthy();
+  });
+
+  it('an error item exits 1 with the array', async () => {
+    const s = setup();
+    seed(s);
+    s.server.setIntercept((c) =>
+      c.method === 'DELETE' ? json(404, { error: 'File not found' }) : undefined,
+    );
+    expect(await s.cli('delete', H, '--json')).toBe(1);
+    expect(JSON.parse(s.stdout())).toEqual([
+      expect.objectContaining({ hash: H, status: 'error', uncertain: true }),
+    ]);
+  });
+
+  it.each([
+    [[]],
+    [['nothex']],
+    [[H, 'nothex']],
+  ])('%j → 2, empty stdout, no request', async (hashes) => {
+    const s = setup();
+    expect(await s.cli('delete', ...hashes, '--json')).toBe(2);
+    expect(s.stdout()).toBe('');
+    expect(s.server.calls).toHaveLength(0);
+  });
+
+  it('a bad hash is a usage error before the server discovery', async () => {
+    const s = setup({ env: { READEST_URL: 'https://readest.example' } }, { session: false });
+    expect(await s.cli('delete', 'nothex', '--json')).toBe(2);
+    expect(await s.cli('upload', epub('D'), '--replace', 'nothex', '--json')).toBe(2);
+    expect(await s.cli('books', '--expect-user', '')).toBe(2);
+    expect(s.stdout()).toBe('');
+    expect(s.server.calls).toHaveLength(0);
+  });
+
+  it('without a session → 3, empty stdout', async () => {
+    const s = setup({}, { session: false });
+    expect(await s.cli('delete', H, '--json')).toBe(3);
+    expect(s.stdout()).toBe('');
+  });
+
+  it('a failing server discovery prints [] and exits 1', async () => {
+    const s = setup({ env: { READEST_URL: 'https://readest.example' } }, { session: false });
+    expect(await s.cli('delete', H, '--json')).toBe(1);
+    expect(s.stdout()).toBe('[]\n');
+  });
+
+  it('another account in --expect-user → 3, nothing written', async () => {
+    const s = setup();
+    seed(s);
+    expect(await s.cli('delete', H, '--json', '--expect-user', 'uid-2')).toBe(3);
+    expect(s.stdout()).toBe('');
+    expect(writes(s)).toEqual([]);
+    expect(s.server.books.get(H)!.deleted_at).toBeNull();
   });
 });
 

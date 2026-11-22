@@ -15,7 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Deps } from '../../../../../selfhost/cli/lib/deps.ts';
-import { AuthRequiredError, CliError } from '../../../../../selfhost/cli/lib/errors.ts';
+import { AuthRequiredError, CliError, UsageError } from '../../../../../selfhost/cli/lib/errors.ts';
 import { resolveProfile } from '../../../../../selfhost/cli/lib/config.ts';
 import type { Profile } from '../../../../../selfhost/cli/lib/config.ts';
 import { withLock } from '../../../../../selfhost/cli/lib/lock.ts';
@@ -27,7 +27,16 @@ import {
   sessionPath,
 } from '../../../../../selfhost/cli/lib/session.ts';
 import type { Session } from '../../../../../selfhost/cli/lib/session.ts';
-import { ApiClient } from '../../../../../selfhost/cli/lib/api.ts';
+import { ApiClient, HttpError } from '../../../../../selfhost/cli/lib/api.ts';
+import type { WireBook } from '../../../../../selfhost/cli/lib/api.ts';
+import {
+  API as FAKE_API,
+  PROFILE as FAKE_PROFILE,
+  UID as FAKE_UID,
+  fakeDeps as serverDeps,
+  fakeServer,
+  writeFreshSession,
+} from './fake-server';
 
 // ------------------------------------------------------------------ fakes
 
@@ -1000,5 +1009,285 @@ describe('ApiClient', () => {
     ]);
     const post = f.calls.find((c) => c.method === 'POST' && c.url.pathname === '/api/sync')!;
     expect(JSON.parse(String(post.init.body))).toMatchObject({ notes: [], configs: [] });
+  });
+});
+
+describe('ApiClient: expected user, ping, objects', () => {
+  it('expectUserId seeds the account: a session of another one is never used', async () => {
+    const f = apiDeps(() => json(200, { books: [] }));
+    const api = new ApiClient(f.deps, PROFILE, { expectUserId: 'uid-2' });
+    const err = await api.ensureAuth().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AuthRequiredError);
+    expect((err as CliError).exitCode).toBe(3);
+    expect(f.calls.filter((c) => c.url.pathname.startsWith('/api/'))).toHaveLength(0);
+    await expect(
+      new ApiClient(f.deps, PROFILE, { expectUserId: 'uid-1' }).ensureAuth(),
+    ).resolves.toBeUndefined();
+  });
+
+  it('ping hits the server and sessionInfo names the session it passed with', async () => {
+    const f = apiDeps(() => json(200, { books: [] }));
+    const api = new ApiClient(f.deps, PROFILE);
+    await api.ping();
+    const calls = f.calls.filter((c) => c.url.pathname === '/api/sync');
+    expect(calls.map((c) => [c.method, Object.fromEntries(c.url.searchParams)])).toEqual([
+      ['GET', { type: 'books', since: String(f.deps.now()) }],
+    ]);
+    expect(api.sessionInfo()).toEqual({
+      email: 'me@example.com',
+      userId: 'uid-1',
+      expiresAt: Math.floor(f.deps.now() / 1000) + 3600,
+    });
+
+    const g = apiDeps((_url, init) =>
+      bearer(init) === 'Bearer at-1'
+        ? json(401, { error: 'Not authenticated' })
+        : json(200, { books: [] }),
+    );
+    writeSession(
+      g.deps,
+      session(g.deps.now(), { expires_at: Math.floor(g.deps.now() / 1000) + 2000 }),
+    );
+    const refreshed = new ApiClient(g.deps, PROFILE);
+    await refreshed.ping();
+    expect(refreshed.sessionInfo().expiresAt, 'the refreshed session, not the rejected one').toBe(
+      Math.floor(Date.now() / 1000) + 3600,
+    );
+
+    const h = apiDeps(() => json(401, { error: 'Not authenticated' }));
+    await expect(new ApiClient(h.deps, PROFILE).ping()).rejects.toBeInstanceOf(AuthRequiredError);
+  });
+
+  it('ping wants a sync answer: a 200 page from a proxy is an error', async () => {
+    const f = apiDeps(() => new Response('<html>login</html>', { status: 200 }));
+    await expect(new ApiClient(f.deps, PROFILE).ping()).rejects.toThrow(/no books array/);
+  });
+
+  it('a write whose answer breaks off or is malformed is uncertain', async () => {
+    let broken = true;
+    const f = apiDeps(() =>
+      broken
+        ? new Response(
+            new ReadableStream({
+              start(c) {
+                c.error(new Error('connection reset'));
+              },
+            }),
+            { status: 200 },
+          )
+        : json(200, { nope: true }),
+    );
+    const api = new ApiClient(f.deps, PROFILE);
+    const fail = () =>
+      api.pushBooks([]).then(
+        () => null,
+        (e: unknown) => e as CliError,
+      );
+    expect((await fail())!.uncertain).toBe(true);
+    broken = false;
+    expect((await fail())!.uncertain).toBe(true);
+  });
+
+  it('deleteObject: 200 → deleted, 404 → missing, 500 → HttpError', async () => {
+    const f = apiDeps((url) => {
+      const key = url.searchParams.get('fileKey');
+      if (key === 'uid-1/a.epub') return json(200, { message: 'File deleted successfully' });
+      if (key === 'uid-1/b.epub') return json(404, { error: 'File not found' });
+      return json(500, { error: 'Could not delete file from storage' });
+    });
+    const api = new ApiClient(f.deps, PROFILE);
+    expect(await api.deleteObject('uid-1/a.epub')).toBe('deleted');
+    expect(await api.deleteObject('uid-1/b.epub')).toBe('missing');
+    const err = await api.deleteObject('uid-1/c.epub').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(500);
+    const dels = f.calls.filter((c) => c.url.pathname === '/api/storage/delete');
+    expect(dels.map((c) => [c.method, c.url.searchParams.get('fileKey')])).toEqual([
+      ['DELETE', 'uid-1/a.epub'],
+      ['DELETE', 'uid-1/b.epub'],
+      ['DELETE', 'uid-1/c.epub'],
+    ]);
+  });
+
+  it('a write that failed on the network or with a 5xx is uncertain; a read or a 4xx is not', async () => {
+    let mode: 'throw' | 500 | 403 = 'throw';
+    const f = apiDeps(() => {
+      if (mode === 'throw') throw new TypeError('fetch failed');
+      return json(mode, { error: 'nope' });
+    });
+    const api = new ApiClient(f.deps, PROFILE);
+    const fail = (p: Promise<unknown>) =>
+      p.then(
+        () => null,
+        (e: unknown) => e as CliError,
+      );
+    expect((await fail(api.deleteObject('k')))!.uncertain).toBe(true);
+    expect((await fail(api.pushBooks([])))!.uncertain).toBe(true);
+    expect((await fail(api.pullBooks()))!.uncertain).toBe(false);
+    mode = 500;
+    expect((await fail(api.request('POST', '/sync', { body: {} })))!.uncertain).toBe(true);
+    expect((await fail(api.pullBooks()))!.uncertain).toBe(false);
+    mode = 403;
+    expect((await fail(api.request('POST', '/sync', { body: {} })))!.uncertain).toBe(false);
+  });
+
+  it('a failed or 5xx PUT to storage is uncertain', async () => {
+    let status = 0;
+    const f = fakeDeps(() => {
+      if (!status) throw new TypeError('fetch failed');
+      return new Response(null, { status });
+    });
+    const api = new ApiClient(f.deps, PROFILE);
+    const put = () =>
+      api.put('https://s3.example/up', { bytes: new Uint8Array([1]) }, 1).then(
+        () => null,
+        (e: unknown) => e as CliError,
+      );
+    expect((await put())!.uncertain).toBe(true);
+    status = 503;
+    expect((await put())!.uncertain).toBe(true);
+    status = 403;
+    expect((await put())!.uncertain).toBe(false);
+  });
+
+  it('bookObjects: a non-hex or empty hash is a usage error without a request', async () => {
+    const f = apiDeps(() => json(200, { files: [] }));
+    const api = new ApiClient(f.deps, PROFILE);
+    for (const h of ['', 'xyz', 'A'.repeat(32), 'a'.repeat(31)]) {
+      await expect(api.bookObjects(h)).rejects.toBeInstanceOf(UsageError);
+    }
+    expect(f.calls.filter((c) => c.url.pathname.startsWith('/api/'))).toHaveLength(0);
+  });
+
+  it('bookObjects keeps only the rows of this book', async () => {
+    const h = 'a'.repeat(32);
+    const f = apiDeps(() =>
+      json(200, {
+        files: [
+          { file_key: `uid-1/Readest/Books/${h}/${h}.epub`, file_size: 1, book_hash: h },
+          { file_key: 'uid-1/Readest/Books/other/x.epub', file_size: 1, book_hash: 'b'.repeat(32) },
+          { file_key: 'uid-1/replica/r.mdd', file_size: 1, book_hash: null },
+        ],
+      }),
+    );
+    const rows = await new ApiClient(f.deps, PROFILE).bookObjects(h);
+    expect(rows.map((r) => r.file_key)).toEqual([`uid-1/Readest/Books/${h}/${h}.epub`]);
+    const list = f.calls.find((c) => c.url.pathname === '/api/storage/list')!;
+    expect(list.url.searchParams.get('bookHash')).toBe(h);
+  });
+});
+
+describe('fake server', () => {
+  const H = 'a'.repeat(32);
+  const serverSetup = () => {
+    const server = fakeServer();
+    const f = serverDeps(server.handler, home);
+    writeFreshSession(f.deps);
+    return { server, api: new ApiClient(f.deps, FAKE_PROFILE) };
+  };
+
+  it('DELETE /api/storage/delete removes the record and the object, with the hash and extension fallback', async () => {
+    const { server, api } = serverSetup();
+    const key = `${FAKE_UID}/Readest/Books/${H}/Title.epub`;
+    server.addFile(key, H, new Uint8Array([1]));
+    server.addFile(`${FAKE_UID}/Readest/Books/${H}/cover.png`, H, new Uint8Array([2]));
+    expect(await api.deleteObject(`${FAKE_UID}/Readest/Books/${H}/${H}.epub`)).toBe('deleted');
+    expect(server.files.map((f) => f.file_key)).toEqual([
+      `${FAKE_UID}/Readest/Books/${H}/cover.png`,
+    ]);
+    expect(server.objects.has(key)).toBe(false);
+    expect(await api.deleteObject(`${FAKE_UID}/Readest/Books/${H}/cover.png`)).toBe('deleted');
+    expect(await api.deleteObject(`${FAKE_UID}/Readest/Books/${H}/cover.png`)).toBe('missing');
+    expect(server.files).toHaveLength(0);
+  });
+
+  it('storage list without a hash returns every file of the user, like the server', async () => {
+    const { server } = serverSetup();
+    server.addFile('k1', H);
+    server.addFile('k2', 'b'.repeat(32));
+    const res = await server.handler(new URL(`${FAKE_API}/api/storage/list?bookHash=`), {});
+    expect(((await res.json()) as { files: unknown[] }).files).toHaveLength(2);
+  });
+
+  // Fixtures of src/__tests__/pages/api/sync-*-merge tests, run through the whole POST.
+  const wire = (over: Partial<WireBook> = {}): WireBook => ({
+    hash: H,
+    metaHash: 'm',
+    format: 'EPUB',
+    title: 'T',
+    author: 'A',
+    createdAt: Date.parse('2026-01-01T00:00:00.000Z'),
+    updatedAt: Date.parse('2026-01-02T00:00:00.000Z'),
+    deletedAt: null,
+    uploadedAt: null,
+    ...over,
+  });
+  const iso = (s: string) => new Date(Date.parse(s)).toISOString();
+
+  it('merge: the server wins the row but a fresher client group is grafted, updated_at kept', async () => {
+    const { server, api } = serverSetup();
+    server.addBook({
+      book_hash: H,
+      updated_at: iso('2026-02-01'),
+      group_id: 'g1',
+      group_name: 'Old',
+      group_updated_at: iso('2026-01-01'),
+      synced_at: iso('2026-02-01'),
+    });
+    await api.pushBooks([
+      wire({
+        groupId: 'g2',
+        groupName: 'New',
+        groupUpdatedAt: Date.parse('2026-01-05'),
+        progress: [1, 2],
+      }),
+    ]);
+    const row = server.books.get(H)!;
+    expect([row.group_id, row.group_name, row.updated_at]).toEqual([
+      'g2',
+      'New',
+      iso('2026-02-01'),
+    ]);
+    expect(row.progress ?? null, 'the row itself stays the server one').toBeNull();
+    expect(Date.parse(row.synced_at!)).toBeGreaterThan(Date.parse('2026-02-01'));
+  });
+
+  it('merge: the client wins the row but keeps a fresher server status and group', async () => {
+    const { server, api } = serverSetup();
+    server.addBook({
+      book_hash: H,
+      updated_at: iso('2026-01-01'),
+      reading_status: 'finished',
+      reading_status_updated_at: iso('2026-03-01'),
+      group_id: 'g1',
+      group_name: 'Kept',
+      group_updated_at: iso('2026-03-01'),
+      page_count: 321,
+    });
+    await api.pushBooks([
+      wire({
+        updatedAt: Date.parse('2026-02-01'),
+        progress: [3, 10],
+        readingStatus: 'reading',
+        readingStatusUpdatedAt: Date.parse('2026-02-01'),
+        groupId: null,
+        groupName: null,
+        groupUpdatedAt: Date.parse('2026-02-01'),
+      }),
+    ]);
+    const row = server.books.get(H)!;
+    expect(row.progress).toEqual([3, 10]);
+    expect([row.reading_status, row.group_name, row.page_count]).toEqual(['finished', 'Kept', 321]);
+  });
+
+  it('merge: a tombstone with an older updated_at still wins; an older plain row is a no-op', async () => {
+    const { server, api } = serverSetup();
+    server.addBook({ book_hash: H, updated_at: iso('2026-02-01'), synced_at: iso('2026-02-01') });
+    await api.pushBooks([wire({ updatedAt: Date.parse('2026-01-15') })]);
+    expect(server.books.get(H)!.synced_at, 'nothing fresher: not written').toBe(iso('2026-02-01'));
+    await api.pushBooks([
+      wire({ updatedAt: Date.parse('2026-01-15'), deletedAt: Date.parse('2026-03-01') }),
+    ]);
+    expect(server.books.get(H)!.deleted_at).toBe(iso('2026-03-01'));
   });
 });

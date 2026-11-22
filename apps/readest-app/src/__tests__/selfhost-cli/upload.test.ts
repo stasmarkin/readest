@@ -533,7 +533,12 @@ describe('groupFields', () => {
 const run = (
   s: ReturnType<typeof setup>,
   files: string[],
-  opts: Partial<{ group: string; dryRun: boolean; allowDuplicate: boolean }> = {},
+  opts: Partial<{
+    group: string;
+    dryRun: boolean;
+    allowDuplicate: boolean;
+    expectMeta: string;
+  }> = {},
 ) => runUpload(s.deps, s.api, PROFILE, files, { dryRun: false, allowDuplicate: false, ...opts });
 
 describe('runUpload', () => {
@@ -548,6 +553,7 @@ describe('runUpload', () => {
       hash: info.hash,
       title: 'Order',
       group: 'Shelf',
+      metaHash: info.metaHash,
     });
     expect(s.server.apiLog()).toEqual([
       'GET /api/sync',
@@ -576,6 +582,7 @@ describe('runUpload', () => {
         hash: info.hash,
         title: 'Order',
         group: 'Shelf',
+        metaHash: info.metaHash,
       },
     ]);
     expect(syncPosts(s.server)).toHaveLength(1);
@@ -819,7 +826,10 @@ describe('runUpload', () => {
       }
       return undefined;
     });
-    await expect(run(s, [path])).rejects.toThrow(/lock lost/);
+    const [r, ...rest] = await run(s, [path, bookFile('Never')]);
+    expect(r).toMatchObject({ file: path, status: 'error', uncertain: true });
+    expect(r!.reason).toMatch(/lock lost/);
+    expect(rest, 'no file after a lost lock').toEqual([]);
     expect(syncPosts(s.server)).toHaveLength(0);
   });
 
@@ -1036,7 +1046,8 @@ describe('runUpload', () => {
       }
       return undefined;
     });
-    await expect(run(s, [path])).rejects.toThrow(/lock lost/);
+    const [r] = await run(s, [path]);
+    expect(r).toMatchObject({ status: 'error', uncertain: true });
     expect(s.server.calls.filter((c) => c.path === '/api/storage/upload')).toHaveLength(
       reservations,
     );
@@ -1213,6 +1224,163 @@ describe('runUpload', () => {
     const [r] = await run(s, [path], { group: 'New' });
     expect(r).toMatchObject({ status: 'reuploaded', group: 'Moved/Elsewhere' });
     expect(s.stderr()).toMatch(/--group is not applied.*stays in "Moved\/Elsewhere"/);
+  });
+
+  it('a lock lost on a later file keeps the results before it', async () => {
+    const s = setup();
+    const a = bookFile('Kept result');
+    const b = bookFile('Lost lock');
+    const infoB = await readBookFile(b);
+    s.server.setIntercept((c) => {
+      if (c.method === 'GET' && c.url.searchParams.get('book') === infoB.hash) stealLock();
+      return undefined;
+    });
+    const results = await run(s, [a, b]);
+    expect(results.map((r) => [r.status, r.uncertain])).toEqual([
+      ['uploaded', undefined],
+      ['error', true],
+    ]);
+  });
+
+  describe('metaHash in every result', () => {
+    it('uploaded and skipped: already carry the metaHash of the row', async () => {
+      const s = setup();
+      const path = bookFile('Meta');
+      const info = await readBookFile(path);
+      const [r] = await run(s, [path]);
+      expect(r).toMatchObject({ status: 'uploaded', metaHash: info.metaHash });
+      expect(r!.metaHash).toBe(s.server.books.get(info.hash)!.meta_hash);
+      const [again] = await run(s, [path]);
+      expect(again).toMatchObject({
+        status: 'skipped',
+        reason: 'already',
+        metaHash: info.metaHash,
+      });
+    });
+
+    it('skipped: duplicate carries the metaHash of the file', async () => {
+      const s = setup();
+      const path = bookFile('Dup meta');
+      const info = await readBookFile(path);
+      s.server.addBook(dbRow('f'.repeat(32), { meta_hash: info.metaHash }));
+      const [r] = await run(s, [path]);
+      expect(r).toMatchObject({ status: 'skipped', reason: 'duplicate', metaHash: info.metaHash });
+    });
+
+    it('revived carries the written metaHash; reuploaded the server one, null included', async () => {
+      const s = setup();
+      const path = bookFile('Revived meta');
+      const info = await readBookFile(path);
+      s.server.addBook(dbRow(info.hash, { deleted_at: '2026-01-05T00:00:00.000Z' }));
+      const [r] = await run(s, [path]);
+      expect(r).toMatchObject({ status: 'revived', metaHash: info.metaHash });
+      expect(s.server.books.get(info.hash)!.meta_hash).toBe(info.metaHash);
+
+      const n = setup();
+      n.server.addBook(dbRow(info.hash, { meta_hash: null }));
+      const [r2] = await run(n, [path]);
+      expect(r2).toMatchObject({ status: 'reuploaded', metaHash: null });
+      expect(JSON.stringify(r2)).toContain('"metaHash":null');
+      expect(n.server.books.get(info.hash)!.meta_hash ?? null).toBeNull();
+    });
+
+    it('skipped: already of a renamed PDF carries the server metaHash', async () => {
+      const s = setup();
+      const path = pdfFile('renamed-again.pdf');
+      const info = await readBookFile(path);
+      const key = `${UID}/Readest/Books/${info.hash}/${info.hash}.pdf`;
+      s.server.addBook(
+        dbRow(info.hash, {
+          format: 'PDF',
+          meta_hash: 'server-meta',
+          uploaded_at: '2026-01-04T00:00:00.000Z',
+        }),
+      );
+      s.server.addFile(key, info.hash, new Uint8Array([1]));
+      const [r] = await run(s, [path]);
+      expect(r).toMatchObject({ status: 'skipped', reason: 'already', metaHash: 'server-meta' });
+    });
+  });
+
+  describe('expectMeta', () => {
+    it.each([
+      ['revived', { deleted_at: '2026-01-05T00:00:00.000Z' }],
+      ['reuploaded', {}],
+      ['already', { uploaded_at: '2026-01-04T00:00:00.000Z' }],
+    ])('a %s row with another meta_hash is a conflict, nothing written', async (_, over) => {
+      const s = setup();
+      const path = bookFile('Owner');
+      const info = await readBookFile(path);
+      s.server.addBook(dbRow(info.hash, { meta_hash: 'someone-else', ...over }));
+      s.server.addFile(`${UID}/${bookKey(info.hash)}`, info.hash, new Uint8Array([1]));
+      const before = { ...s.server.books.get(info.hash)! };
+      const [r] = await run(s, [path], { expectMeta: info.metaHash });
+      expect(r).toMatchObject({ status: 'error' });
+      expect(r!.reason).toMatch(/^conflict/);
+      expect(r).not.toHaveProperty('uncertain');
+      expect(s.server.calls.filter((c) => c.method !== 'GET')).toEqual([]);
+      expect(s.server.books.get(info.hash)).toEqual(before);
+    });
+
+    it('a row with the expected meta_hash is taken over as usual', async () => {
+      const s = setup();
+      const path = bookFile('Mine');
+      const info = await readBookFile(path);
+      s.server.addBook(
+        dbRow(info.hash, { meta_hash: info.metaHash, deleted_at: '2026-01-05T00:00:00.000Z' }),
+      );
+      const [r] = await run(s, [path], { expectMeta: info.metaHash });
+      expect(r!.status).toBe('revived');
+      const [fresh] = await run(setup(), [bookFile('Fresh')], { expectMeta: 'anything' });
+      expect(fresh!.status, 'no row of the hash: nothing to own').toBe('uploaded');
+    });
+  });
+
+  describe('uncertain', () => {
+    it('a POST that was not confirmed is uncertain; a quota refusal is not', async () => {
+      const s = setup();
+      s.server.setIntercept((c) =>
+        c.method === 'POST' && c.path === '/api/sync' ? 'throw' : undefined,
+      );
+      const [r] = await run(s, [bookFile('Unsure')]);
+      expect(r).toMatchObject({ status: 'error', uncertain: true });
+      expect(r!.reason).toMatch(/sync not confirmed/);
+
+      const q = setup({ quota: 10 });
+      const [r2] = await run(q, [bookFile('Too big')]);
+      expect(r2!.status).toBe('error');
+      expect(r2).not.toHaveProperty('uncertain');
+    });
+
+    it('a 5xx PUT keeps its uncertainty through the reservation hint', async () => {
+      const s = setup();
+      s.server.setIntercept((c) =>
+        c.method === 'PUT' ? new Response('', { status: 503 }) : undefined,
+      );
+      const [r] = await run(s, [bookFile('Put 503')]);
+      expect(r).toMatchObject({ status: 'error', uncertain: true });
+      expect(r!.reason).toMatch(/reservation/);
+    });
+
+    it('a failed re-read after the PUTs is uncertain; a failed first read is not', async () => {
+      const s = setup();
+      let gets = 0;
+      s.server.setIntercept((c) =>
+        c.method === 'GET' && c.path === '/api/sync' && ++gets >= 2
+          ? json(500, { error: 'db down' })
+          : undefined,
+      );
+      const [r] = await run(s, [bookFile('Reread')]);
+      expect(r).toMatchObject({ status: 'error', uncertain: true });
+
+      const f = setup();
+      f.server.setIntercept((c) =>
+        c.method === 'GET' && c.path === '/api/sync' ? json(500, { error: 'db down' }) : undefined,
+      );
+      const [r2] = await run(f, [bookFile('First read')]);
+      expect(r2!.status).toBe('error');
+      expect(r2).not.toHaveProperty('uncertain');
+    });
   });
 
   it('runs under the profile upload lock; a second run waits for the first', async () => {
