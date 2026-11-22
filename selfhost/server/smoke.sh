@@ -17,6 +17,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "smoke: unknown arg $1" >&2; exit 2 ;;
   esac
 done
+if [[ -n "$public" && -n "$expect_sha" ]]; then echo "smoke: --public checks only the first MiB; --expect-sha256 can't apply" >&2; exit 2; fi
 if [[ $force_fail -eq 1 ]]; then echo "smoke: forced failure (test hook)" >&2; exit 1; fi
 
 envval() { grep -E "^$1=" "$dir/.env" | head -1 | cut -d= -f2- | sed -E "s/^['\"](.*)['\"]$/\\1/"; }

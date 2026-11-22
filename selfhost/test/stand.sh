@@ -22,16 +22,21 @@ if [[ -n "$(grep -vxF "$vm_dir" <<<"$owners" | grep . || true)" ]]; then
   echo "stand: compose project 'readest' in this VM is not the stand ($(sort -u <<<"$owners" | tr '\n' ' ')); refusing" >&2
   exit 1
 fi
-volumes="$(vm "docker volume ls -q --filter name=^readest_")" || { echo "stand: cannot list volumes in the VM" >&2; exit 1; }
-if [[ -n "$volumes" ]] && ! vm "test -f $vm_dir/.readest-stand"; then
-  echo "stand: readest_* volumes exist in this VM but no stand marker at $vm_dir; refusing" >&2
+# The marker records the creation time of the stand's volumes and lives outside the stand dir
+# (deploys replace that dir): volumes recreated by anyone else no longer match it.
+# shellcheck disable=SC2016 # expanded inside the VM
+marker='$HOME/.readest-stand-volumes'
+vol_ids='docker volume ls -q --filter name=^readest_ | sort | xargs -r docker volume inspect -f "{{.Name}} {{.CreatedAt}}"'
+volumes="$(vm "$vol_ids")" || { echo "stand: cannot list volumes in the VM" >&2; exit 1; }
+if [[ -n "$volumes" && "$volumes" != "$(vm "cat $marker 2>/dev/null" || true)" ]]; then
+  echo "stand: readest_* volumes in this VM are not the stand's (no matching $marker); refusing" >&2
   exit 1
 fi
 compose="docker compose --project-directory $vm_dir --env-file $vm_dir/.env -f $vm_dir/compose.yaml -f $vm_dir/compose.override.yaml -f $vm_dir/compose.colima.yaml"
 
 case "$cmd" in
   down)
-    vm "[ -d $vm_dir ] && $compose down -v --remove-orphans || true; sudo rm -rf $vm_dir"
+    vm "[ -d $vm_dir ] && $compose down -v --remove-orphans || true; sudo rm -rf $vm_dir $marker"
     echo "stand: removed $vm_dir"
     ;;
   up)
@@ -67,8 +72,8 @@ case "$cmd" in
     find "$stage" -name '._*' -delete
     vm "docker network inspect coolify >/dev/null 2>&1 || docker network create coolify >/dev/null
       [ -d $vm_dir ] && $compose down -v --remove-orphans >/dev/null 2>&1 || true
-      sudo rm -rf $vm_dir && mkdir -p $vm_dir && cp -a $stage/. $vm_dir/ && chmod 600 $vm_dir/.env && touch $vm_dir/.readest-stand
-      $compose up -d"
+      sudo rm -rf $vm_dir && mkdir -p $vm_dir && cp -a $stage/. $vm_dir/ && chmod 600 $vm_dir/.env
+      $compose up -d && $vol_ids >$marker"
     for _ in $(seq 1 60); do
       if vm "docker exec supabase-db psql -U postgres -tAc 'select count(*) from readest_meta.migrations'" 2>/dev/null | grep -qx "$want_migrations"; then
         echo "stand: up at $vm_dir on $prod_image, $want_migrations migrations applied"

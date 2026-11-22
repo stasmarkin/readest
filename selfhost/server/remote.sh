@@ -249,7 +249,7 @@ snapshot() {
     # After a failed deploy kong/client/minio may be stopped: backup.sh needs minio, and the stack
     # must stay closed, so bring them up in maintenance first.
     if ! public_services_running; then
-      if ! { dc maint up -d >&2 && wait_db maint; }; then snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; fi
+      if ! { dc maint up -d >&2 && wait_db maint && probe_closed; }; then snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; fi
     fi
     READEST_OPS_LOCKED=1 "$dir/backup.sh" >&2 || { snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; }
     dc down >&2 || { snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; }
@@ -291,8 +291,13 @@ snapshot_failed() {
   # Before a deploy the stack ran its normal config; before a rollback it may have been closed on
   # purpose, so only the very containers that were running come back.
   if [[ "$kind" == deploy && -f "$dir/compose.yaml" && -f "$dir/.env" ]]; then
-    # Reopen only a stack that was open; a closed one (after a failed deploy) stays closed.
-    if [[ "$running_public" == 1 ]]; then dc up -d --pull never >&2 && return 0; else dc maint up -d --pull never >&2 && return 0; fi
+    # Reopen only a stack that was open; a closed one (after a failed deploy) stays closed, with its
+    # public-facing services stopped in case maintenance itself leaked a route.
+    if [[ "$running_public" == 1 ]]; then
+      dc up -d --pull never >&2 && return 0
+    else
+      dc stop kong client minio >&2 && { log "stack left closed: kong, client and minio stopped"; return 0; }
+    fi
   fi
   if [[ -n "$running" ]]; then
     # shellcheck disable=SC2086
@@ -426,8 +431,10 @@ restore() {
   log "restored $snap"
 }
 
+# Keeps the newest three deploy snapshots, the latest one of the previous client version, and any
+# paths given as arguments (the snapshot a rollback just restored).
 rotate() {
-  local current keep=() snap img
+  local current keep=("$@") snap img
   current="$(envval READEST_IMAGE)"
   mapfile -t snaps < <(find "$dir/backups" -maxdepth 1 -type d -name 'deploy-*' | sort -r)
   local i=0 prev_kept=0
@@ -477,8 +484,8 @@ case "$mode" in
     # on public-facing services exist, so a failure stops them instead of rolling back over writes
     # they might have taken; the database stays up so a new --deploy can start from this state.
     if ! { dc maint up -d >&2 && dc maint exec -T db psql -U postgres -c "NOTIFY pgrst, 'reload schema'" >&2 && probe_closed; }; then
-      dc stop kong client minio >&2 || true
-      die "the closed stack did not come up cleanly; kong, client and minio stopped, nothing rolled back. Inspect, then deploy.sh --deploy again or --rollback $(basename "$snap" | sed 's/^deploy-//') --accept-loss"
+      if dc stop kong client minio >&2; then stopped="kong, client and minio stopped"; else stopped="STOPPING kong, client and minio FAILED — public routes may still be up"; fi
+      die "the closed stack did not come up cleanly; $stopped, nothing rolled back. Inspect, then deploy.sh --deploy again or --rollback $(basename "$snap" | sed 's/^deploy-//') --accept-loss"
     fi
     smoke_args=()
     [[ $fail_smoke -eq 1 ]] && smoke_args+=(--force-fail)
@@ -506,7 +513,7 @@ case "$mode" in
     current="$(snapshot rollback rollback)" || die "could not save the current state; nothing restored"
     log "current state saved to $current"
     restore "$snap"
-    rotate
+    rotate "$snap"
     ;;
   *) die "unknown mode $mode" ;;
 esac
