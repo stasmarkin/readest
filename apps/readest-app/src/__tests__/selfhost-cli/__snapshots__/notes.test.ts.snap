@@ -1,0 +1,141 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderNotesMarkdown > matches the snapshot on the alice fixture 1`] = `
+"# Alice's Adventures in Wonderland
+**Author**: Lewis Carroll
+
+**Exported from Readest**: 2026-11-22
+
+---
+
+## Highlights & Annotations
+
+> Lewis Carroll
+
+*Page: 1 · Time: 2026-07-26T08:13:35.597Z*
+
+> The Pool of Tears
+
+**Note**: Tears
+
+*Page: 2 · Time: 2026-07-26T08:13:28.583Z*
+
+> The Duchess!
+
+**Note**: Duchess
+
+*Page: 3 · Time: 2026-07-26T08:13:24.577Z*
+
+> Very soon the Rabbit noticed Alice, as she went hunting about,
+> and called out to her, in an angry tone
+
+**Note**: Rabbit
+
+*Page: 4 · Time: 2026-07-26T08:13:24.577Z*
+
+> Alice remained looking thoughtfully at the mushroom for a
+> minute, trying to make out which were the two sides of it;
+
+*Page: 5 · Time: 2026-07-26T08:13:24.577Z*
+
+> “But I don’t want to go among mad people,” Alice remarked.
+
+*Page: 6 · Time: 2026-07-26T08:13:32.890Z*
+
+> “首先，”猫说，“狗不会生气的。你同意吗？
+
+*Page: 7 · Time: 2026-07-26T08:13:26.346Z*
+
+> Come, we shall have some fun now!” thought Alice.
+
+*Page: 8 · Time: 2026-07-26T08:13:32.889Z*
+
+> Alice
+
+*Page: 9 · Time: 2026-07-26T08:13:26.346Z*
+
+> The Mock Turtle sighed deeply, and drew the back of one flapper
+> across his eyes
+
+**Note**: His eyes
+
+*Page: 14 · Time: 2026-07-26T08:13:24.577Z*
+
+> The Mock Turtle sighed deeply, and drew the back of one flapper across his eyes. 
+
+*Page: 15 · Time: 2026-07-26T08:13:24.577Z*
+
+>  “Same as if he had a bone in
+> his throat,” said the Gryphon;
+
+**Note**: Gryphon
+
+*Page: 16 · Time: 2026-07-26T08:13:24.577Z*
+
+> “Back to land again, and—that’s all the first figure,” said the
+> Mock Turtle, suddenly dropping his voice; and the two creatures,
+> who had been jumping about like mad things all this time, sat down
+> again very sadly and quietly, and looked at Alice.
+
+*Page: 17 · Time: 2026-07-26T08:13:28.585Z*
+
+> “Thank you,” said Alice, “it’s very interesting. I never knew so much about a whiting before.”
+
+*Page: 18 · Time: 2026-07-26T08:13:24.577Z*
+
+> “If I’d been the whiting,” said Alice, whose thoughts were still running on the song, “I’d have said to the porpoise, ‘Keep back, please! We don’t want you with us!’”
+
+*Page: 19 · Time: 2026-07-26T08:13:26.346Z*
+
+> All this time the Queen had never left off staring at the Hatter, and, just as the Dormouse crossed the court, she said, to one of the officers of the court, “Bring me the list of the singers in the last concert!” on which the wretched Hatter trembled so, that he shook off both his shoes.
+
+**Note**: This is interesting.
+
+*Page: 22 · Time: 2026-07-26T08:13:24.577Z*
+
+> “That’s very important,” the King said, turning to the jury.
+> They were just beginning to write this down on their slates, when
+> the White Rabbit interrupted: “Unimportant, your Majesty means, of
+> course,” he said, in a very respectful tone, but frowning and
+> making faces at him as he spoke.
+
+*Page: 23 · Time: 2026-07-26T08:13:28.585Z*
+
+>  else you’d have
+> signed your name like an honest man.”
+> There was a general clapping of hands
+
+*Page: 24 · Time: 2026-07-26T08:13:28.583Z*
+
+## Bookmarks
+
+> She had quite forgotten the Duchess by this time, and was a
+> little startled when she heard her voice close to her ear. “You’re
+> t...
+
+*Page: 10 · Time: 2026-07-26T08:13:28.584Z*
+
+> She had quite forgotten the Duchess by this time, and was a
+> little startled when she heard her voice close to her ear. “You’re
+> t...
+
+*Page: 11 · Time: 2026-07-26T08:13:28.585Z*
+
+> in Chapter 9 - The Mock Turtle’s Story
+
+*Page: 12 · Time: 2026-07-26T08:13:28.584Z*
+
+> in Chapter 9 - The Mock Turtle’s Story
+
+*Page: 13 · Time: 2026-07-26T08:13:28.585Z*
+
+> “Wouldn’t it really?” said Alice in a tone of great
+> surprise.
+
+*Page: 20 · Time: 2026-07-26T08:13:28.585Z*
+
+> “Herald, read the accusation!” said the King.
+
+*Page: 21 · Time: 2026-07-26T08:13:28.584Z*
+"
+`;
