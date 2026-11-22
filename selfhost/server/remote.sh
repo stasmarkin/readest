@@ -193,56 +193,77 @@ wait_db() {
   return 1
 }
 
+# Cold snapshot into backups/<prefix>-<ts>. Built in a .partial-* dir and renamed only after every
+# archive checked out, so restore never sees a half-written one. Prints the final path.
+#   kind=deploy:   image digests (or saved images), backup.sh, then `compose down`
+#   kind=rollback: images by tag only, stop whatever runs — works on a broken, half-written stack
+# On failure: the dir becomes failed-<ts> and the containers that were running are started again.
 snapshot() {
-  local prefix="$1" ts snap
+  local prefix="$1" kind="$2" ts snap part
   ts="$(date +%Y%m%d-%H%M%S)"
   snap="$dir/backups/$prefix-$ts"
-  mkdir -p "$dir/backups"
-  mkdir -m 700 "$snap"
+  part="$dir/backups/.partial-$prefix-$ts"
+  mkdir -p "$dir/backups" && mkdir -m 700 "$part" || return 1
   # Called inside $(...) || ..., where errexit is off: every step checks its own status.
-  local cids cid svc img id digest
-  cids="$(docker ps -aq --filter "label=com.docker.compose.project=$project")" || { snapshot_failed "$snap"; return 1; }
-  [[ -n "$cids" ]] || { log "no containers of project $project"; snapshot_failed "$snap"; return 1; }
-  : >"$snap/images.tsv"
+  local running cids cid svc img id digest
+  running="$(docker ps -q --filter "label=com.docker.compose.project=$project")" || { snapshot_failed "$part" "$ts" ""; return 1; }
+  cids="$(docker ps -aq --filter "label=com.docker.compose.project=$project")" || { snapshot_failed "$part" "$ts" ""; return 1; }
+  if [[ "$kind" == deploy && -z "$cids" ]]; then log "no containers of project $project"; snapshot_failed "$part" "$ts" ""; return 1; fi
+  : >"$part/images.tsv"
   for cid in $cids; do
     if ! { svc="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$cid")" &&
       img="$(docker inspect -f '{{.Config.Image}}' "$cid")" &&
-      id="$(docker inspect -f '{{.Image}}' "$cid")" &&
-      digest="$(docker image inspect -f '{{range .RepoDigests}}{{.}} {{end}}' "$id" | awk '{print $1}')"; }; then
-      snapshot_failed "$snap"
+      id="$(docker inspect -f '{{.Image}}' "$cid")"; }; then
+      snapshot_failed "$part" "$ts" "$running"
       return 1
     fi
-    if [[ -z "$digest" ]]; then
-      if ! { mkdir -p "$snap/images" && docker save -o "$snap/images/$svc.tar" "$id"; }; then
-        snapshot_failed "$snap"
+    digest=tag
+    if [[ "$kind" == deploy ]]; then
+      if ! digest="$(docker image inspect -f '{{range .RepoDigests}}{{.}} {{end}}' "$id" | awk '{print $1}')"; then
+        snapshot_failed "$part" "$ts" "$running"
         return 1
       fi
-      digest="-"
+      if [[ -z "$digest" ]]; then
+        if ! { mkdir -p "$part/images" && docker save -o "$part/images/$svc.tar" "$id"; }; then
+          snapshot_failed "$part" "$ts" "$running"
+          return 1
+        fi
+        digest="-"
+      fi
     fi
-    printf '%s\t%s\t%s\t%s\n' "$svc" "$img" "$id" "$digest" >>"$snap/images.tsv" || { snapshot_failed "$snap"; return 1; }
+    printf '%s\t%s\t%s\t%s\n' "$svc" "$img" "$id" "$digest" >>"$part/images.tsv" || { snapshot_failed "$part" "$ts" "$running"; return 1; }
   done
-  READEST_OPS_LOCKED=1 "$dir/backup.sh" >&2 || { snapshot_failed "$snap"; return 1; }
-  dc down >&2 || { snapshot_failed "$snap"; return 1; }
-  tar -C "$dir" --exclude=./backups --exclude=./.ops.lock -czf "$snap/config.tgz" . || { snapshot_failed "$snap"; return 1; }
+  if [[ "$kind" == deploy ]]; then
+    READEST_OPS_LOCKED=1 "$dir/backup.sh" >&2 || { snapshot_failed "$part" "$ts" "$running"; return 1; }
+    dc down >&2 || { snapshot_failed "$part" "$ts" "$running"; return 1; }
+  fi
+  stop_project || { snapshot_failed "$part" "$ts" "$running"; return 1; }
+  tar -C "$dir" --exclude=./backups --exclude=./.ops.lock -czf "$part/config.tgz" . || { snapshot_failed "$part" "$ts" "$running"; return 1; }
   if [[ $fail_snapshot -eq 1 ]]; then
     log "test hook: failing the snapshot after down"
-    snapshot_failed "$snap"
+    snapshot_failed "$part" "$ts" "$running"
     return 1
   fi
   local vol
   for vol in db-data minio-data; do
-    docker run --rm -v "${project}_$vol:/v:ro" -v "$snap:/s" alpine sh -c "tar -C /v -cf /s/$vol.tar . && tar -tf /s/$vol.tar >/dev/null" ||
-      { snapshot_failed "$snap"; return 1; }
+    docker run --rm -v "${project}_$vol:/v:ro" -v "$part:/s" alpine sh -c "tar -C /v -cf /s/$vol.tar . && tar -tf /s/$vol.tar >/dev/null" ||
+      { snapshot_failed "$part" "$ts" "$running"; return 1; }
   done
+  mv "$part" "$snap" || { snapshot_failed "$part" "$ts" "$running"; return 1; }
   log "snapshot $snap"
   echo "$snap"
 }
 
 snapshot_failed() {
-  local snap="$1"
-  mv "$snap" "${snap/\/deploy-//failed-}" 2>/dev/null || mv "$snap" "$dir/backups/failed-$(basename "$snap")"
-  log "snapshot failed; starting the previous stack again"
-  dc up -d --pull never >&2 || log "could not start the previous stack — run docker compose up -d in $dir by hand"
+  local part="$1" ts="$2" running="$3"
+  mv "$part" "$dir/backups/failed-$ts" 2>/dev/null || true
+  log "snapshot failed (kept as backups/failed-$ts); starting the previous stack again"
+  if [[ -f "$dir/compose.yaml" && -f "$dir/.env" ]] && dc up -d --pull never >&2; then return 0; fi
+  if [[ -n "$running" ]]; then
+    # shellcheck disable=SC2086
+    docker start $running >&2 && return 0
+  fi
+  log "could not start the previous stack — check $dir by hand"
 }
 
 smoke() {
@@ -293,29 +314,18 @@ stop_project() {
   [[ -z "$running" ]]
 }
 
-# Snapshot before a manual rollback: works on a stopped or half-written stack (no backup.sh, no
-# compose config needed) — the volume copies are the backup.
-snapshot_before_rollback() {
-  local snap cid
-  snap="$dir/backups/rollback-$(date +%Y%m%d-%H%M%S)"
-  mkdir -m 700 "$snap" || return 1
-  : >"$snap/images.tsv"
-  for cid in $(docker ps -aq --filter "label=com.docker.compose.project=$project"); do
-    printf '%s\t%s\t%s\ttag\n' "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$cid")" \
-      "$(docker inspect -f '{{.Config.Image}}' "$cid")" "$(docker inspect -f '{{.Image}}' "$cid")" >>"$snap/images.tsv" || return 1
-  done
-  stop_project || return 1
-  tar -C "$dir" --exclude=./backups --exclude=./.ops.lock -czf "$snap/config.tgz" . || return 1
-  local vol
-  for vol in db-data minio-data; do
-    docker run --rm -v "${project}_$vol:/v:ro" -v "$snap:/s" alpine sh -c "tar -C /v -cf /s/$vol.tar . && tar -tf /s/$vol.tar >/dev/null" || return 1
-  done
-  log "current state saved to $snap (volumes and config; images by tag only)"
-}
-
 restore() {
   local snap="$1"
-  [[ -f "$snap/config.tgz" && -f "$snap/db-data.tar" && -f "$snap/minio-data.tar" ]] || die "$snap is incomplete"
+  [[ -f "$snap/config.tgz" && -f "$snap/db-data.tar" && -f "$snap/minio-data.tar" && -f "$snap/images.tsv" ]] || die "$snap is incomplete"
+  # Every image the snapshot ran must be available before anything is touched.
+  local svc img id digest
+  while IFS=$'\t' read -r svc img id digest; do
+    case "$digest" in
+      tag) docker image inspect "$id" >/dev/null 2>&1 || die "image $img ($id) of $svc is gone; nothing restored" ;;
+      -) [[ -f "$snap/images/$svc.tar" ]] || die "saved image of $svc missing; nothing restored" ;;
+      *) docker image inspect "$id" >/dev/null 2>&1 || docker pull "$digest" >&2 || die "cannot pull $digest; nothing restored" ;;
+    esac
+  done <"$snap/images.tsv"
   log "restoring $snap"
   if [[ -f "$dir/compose.yaml" && -f "$dir/.env" ]]; then dc down >&2 || true; fi
   # Volumes are wiped below: nothing of the project may still be running, whatever config is on disk.
@@ -326,19 +336,9 @@ restore() {
   if ! grep -q 'ops.lock' "$dir/backup.sh" 2>/dev/null; then
     cp -a "$srv/backup.sh" "$dir/.backup.sh.new" && chmod 700 "$dir/.backup.sh.new" && mv "$dir/.backup.sh.new" "$dir/backup.sh"
   fi
-  local svc img id digest
   while IFS=$'\t' read -r svc img id digest; do
-    if [[ "$digest" == tag ]]; then
-      docker image inspect "$id" >/dev/null 2>&1 && docker tag "$id" "$img"
-    elif [[ "$digest" == - ]]; then
-      docker load -i "$snap/images/$svc.tar" >&2
-      docker tag "$id" "$img"
-    elif ! docker image inspect "$id" >/dev/null 2>&1; then
-      docker pull "$digest" >&2
-      docker tag "$digest" "$img"
-    else
-      docker tag "$id" "$img"
-    fi
+    [[ "$digest" == - ]] && docker load -i "$snap/images/$svc.tar" >&2
+    docker tag "$id" "$img"
   done <"$snap/images.tsv"
   local vol
   for vol in db-data minio-data; do
@@ -381,7 +381,7 @@ case "$mode" in
     lock
     step0_cron_lock
     step1_checks "$arg"
-    snap="$(snapshot deploy)" || exit 1
+    snap="$(snapshot deploy deploy)" || exit 1
     log "step 3: install files, pull, migrate (closed)"
     if ! { find "$dir" -mindepth 1 -maxdepth 1 ! -name backups ! -name .ops.lock ! -name wellknown ! -name backup.sh -exec rm -rf {} + &&
       cp -a "$new_tree/." "$dir/" && rm -rf "$new_tree" && dc maint pull >&2 && dc maint up -d >&2 && wait_db maint &&
@@ -419,7 +419,8 @@ case "$mode" in
     [[ -d "$snap" ]] || snap="$dir/backups/rollback-$arg"
     [[ -d "$snap" ]] || die "no snapshot $arg"
     check_space
-    snapshot_before_rollback || die "could not save the current state; nothing restored"
+    current="$(snapshot rollback rollback)" || die "could not save the current state; nothing restored"
+    log "current state saved to $current"
     restore "$snap"
     ;;
   *) die "unknown mode $mode" ;;

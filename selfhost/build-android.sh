@@ -77,16 +77,19 @@ trap cleanup EXIT
 
 # keystore.properties may hold the regular release signing config (or link to it); park it.
 ks_props="$gen/keystore.properties"
-# A build killed before its cleanup left the original parked; put it back before parking again.
+# A build killed before its cleanup left state behind: the original parked, or our own file marked.
 if [[ -e "$ks_props.before-selfhost" || -L "$ks_props.before-selfhost" ]]; then
   rm -f "$ks_props"
   mv "$ks_props.before-selfhost" "$ks_props"
+elif [[ -e "$ks_props.selfhost-owned" ]]; then
+  rm -f "$ks_props" "$ks_props.selfhost-owned"
 fi
 if [[ -e "$ks_props" || -L "$ks_props" ]]; then
   mv "$ks_props" "$ks_props.before-selfhost"
   cleanup_cmds+=('rm -f "$ks_props"; mv "$ks_props.before-selfhost" "$ks_props"')
 else
-  cleanup_cmds+=('rm -f "$ks_props"')
+  : >"$ks_props.selfhost-owned"
+  cleanup_cmds+=('rm -f "$ks_props" "$ks_props.selfhost-owned"')
 fi
 (umask 077 && printf 'keyAlias=readest-selfhost\npassword=%s\nstoreFile=%s\n' "$password" "$jks" >"$ks_props")
 git -C "$root" check-ignore -q "$ks_props" || die "$ks_props is not git-ignored"
