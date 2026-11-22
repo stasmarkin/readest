@@ -250,6 +250,7 @@ snapshot() {
     docker run --rm -v "${project}_$vol:/v:ro" -v "$part:/s" alpine sh -c "tar -C /v -cf /s/$vol.tar . && tar -tf /s/$vol.tar >/dev/null" ||
       { snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; }
   done
+  (cd "$part" && sha256sum config.tgz db-data.tar minio-data.tar >SHA256SUMS) || { snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; }
   mv -T "$part" "$snap" || { snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; }
   log "snapshot $snap"
   echo "$snap"
@@ -321,11 +322,9 @@ stop_project() {
 restore_preflight() {
   local snap="$1"
   [[ -f "$snap/config.tgz" && -f "$snap/db-data.tar" && -f "$snap/minio-data.tar" && -f "$snap/images.tsv" ]] || die "$snap is incomplete"
-  # Read every archive to the end now: a truncated one must fail before the stack is touched.
-  if ! { gzip -t "$snap/config.tgz" && tar -tzf "$snap/config.tgz" >/dev/null &&
-    tar -tf "$snap/db-data.tar" >/dev/null && tar -tf "$snap/minio-data.tar" >/dev/null; }; then
-    die "$snap has a damaged archive; nothing restored"
-  fi
+  # Checksums written when the snapshot was taken: a truncated or altered archive fails here,
+  # before the stack is touched.
+  (cd "$snap" && sha256sum -c --quiet SHA256SUMS) >&2 || die "$snap has no checksums or a damaged archive; nothing restored"
   local svc img id digest
   while IFS=$'\t' read -r svc img id digest; do
     case "$digest" in
