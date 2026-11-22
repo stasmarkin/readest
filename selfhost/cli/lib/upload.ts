@@ -464,6 +464,7 @@ export const runUpload = async (
   opts: { group?: string; dryRun: boolean; allowDuplicate: boolean },
 ): Promise<UploadResult[]> => {
   groupFields(opts.group);
+  await api.ensureAuth();
   return withLock(
     uploadLockPath(deps, profile),
     {

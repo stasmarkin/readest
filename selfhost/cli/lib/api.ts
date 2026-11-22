@@ -167,6 +167,11 @@ export class ApiClient {
     return this.#token ?? this.#session();
   }
 
+  /** Fails with exit 3 before any per-file work when there is no usable session. */
+  async ensureAuth(): Promise<void> {
+    await this.#currentToken();
+  }
+
   async request(
     method: string,
     path: string,

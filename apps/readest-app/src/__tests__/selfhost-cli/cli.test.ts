@@ -275,6 +275,13 @@ describe('upload', () => {
     expect(readSecret).not.toHaveBeenCalled();
     expect(s.stdout()).toBe('');
   });
+
+  it('no session and only unreadable files: upload --json exits 3, not 1', async () => {
+    const s = setup({}, { session: false });
+    expect(await s.cli('upload', '/nonexistent/book.epub', '--json')).toBe(3);
+    expect(s.stdout()).toBe('');
+    expect(s.stderr()).toContain('login required: run readest login');
+  });
 });
 
 describe('login', () => {
