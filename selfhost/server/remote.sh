@@ -324,7 +324,9 @@ restore_preflight() {
   [[ -f "$snap/config.tgz" && -f "$snap/db-data.tar" && -f "$snap/minio-data.tar" && -f "$snap/images.tsv" ]] || die "$snap is incomplete"
   # Checksums written when the snapshot was taken: a truncated or altered archive fails here,
   # before the stack is touched.
-  (cd "$snap" && sha256sum -c --quiet SHA256SUMS) >&2 || die "$snap has no checksums or a damaged archive; nothing restored"
+  [[ "$(awk '{print $2}' "$snap/SHA256SUMS" 2>/dev/null | sort | tr '\n' ' ')" == "config.tgz db-data.tar minio-data.tar " ]] ||
+    die "$snap has no complete SHA256SUMS; nothing restored"
+  (cd "$snap" && sha256sum -c --quiet SHA256SUMS) >&2 || die "$snap has a damaged archive; nothing restored"
   local svc img id digest
   while IFS=$'\t' read -r svc img id digest; do
     case "$digest" in
