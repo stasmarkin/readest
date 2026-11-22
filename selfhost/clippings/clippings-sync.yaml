@@ -1,0 +1,22 @@
+# Зеркало Obsidian 06_Clippings в группу Clippings библиотеки Readest (selfhost/clippings/README.md).
+# Ставится симлинком в ~/Workspace/Projects/_system/dagu/dags/ из основного чекаута.
+description: Синк клиппингов Obsidian в Readest (EPUB со вшитыми картинками)
+schedule: "20 * * * *"
+
+max_active_runs: 1
+
+# Синк идемпотентен по реестру и журналу: после сна ближайший прогон увидит всё сразу.
+catchup_window: ""
+
+retry_policy:
+  limit: 0
+
+hist_retention_days: 14
+
+env:
+  - PATH: /Users/stasmarkin/.local/bin:/Users/stasmarkin/.local/share/mise/shims:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+steps:
+  - name: clippings-sync
+    run: /Users/stasmarkin/.local/bin/readest-clippings-sync --notify
+    timeout_sec: 1800
