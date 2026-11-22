@@ -217,6 +217,8 @@ snapshot() {
   # Called inside $(...) || ..., where errexit is off: every step checks its own status.
   local running cids cid svc img id digest
   running="$(docker ps -q --filter "label=com.docker.compose.project=$project")" || { snapshot_failed "$part" "$ts" "" "$kind"; return 1; }
+  running_public=0
+  public_services_running && running_public=1
   cids="$(docker ps -aq --filter "label=com.docker.compose.project=$project")" || { snapshot_failed "$part" "$ts" "" "$kind"; return 1; }
   if [[ "$kind" == deploy && -z "$cids" ]]; then log "no containers of project $project"; snapshot_failed "$part" "$ts" "" "$kind"; return 1; fi
   : >"$part/images.tsv"
@@ -244,6 +246,11 @@ snapshot() {
     printf '%s\t%s\t%s\t%s\n' "$svc" "$img" "$id" "$digest" >>"$part/images.tsv" || { snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; }
   done
   if [[ "$kind" == deploy ]]; then
+    # After a failed deploy kong/client/minio may be stopped: backup.sh needs minio, and the stack
+    # must stay closed, so bring them up in maintenance first.
+    if ! public_services_running; then
+      if ! { dc maint up -d >&2 && wait_db maint; }; then snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; fi
+    fi
     READEST_OPS_LOCKED=1 "$dir/backup.sh" >&2 || { snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; }
     dc down >&2 || { snapshot_failed "$part" "$ts" "$running" "$kind"; return 1; }
   fi
@@ -266,13 +273,27 @@ snapshot() {
   echo "$snap"
 }
 
+# True when kong, client and minio all run with Traefik routes (the stack is open).
+public_services_running() {
+  local svc cid
+  for svc in kong client minio; do
+    cid="$(docker ps -q --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$svc")"
+    [[ -n "$cid" ]] || return 1
+    [[ "$(docker inspect -f '{{index .Config.Labels "traefik.enable"}}' "$cid")" == true ]] || return 1
+  done
+}
+
+running_public=0
 snapshot_failed() {
   local part="$1" ts="$2" running="$3" kind="$4"
   mv -T "$part" "$dir/backups/failed-$ts" 2>/dev/null || true
   log "snapshot failed (kept as backups/failed-$ts); starting the previous stack again"
   # Before a deploy the stack ran its normal config; before a rollback it may have been closed on
   # purpose, so only the very containers that were running come back.
-  if [[ "$kind" == deploy && -f "$dir/compose.yaml" && -f "$dir/.env" ]] && dc up -d --pull never >&2; then return 0; fi
+  if [[ "$kind" == deploy && -f "$dir/compose.yaml" && -f "$dir/.env" ]]; then
+    # Reopen only a stack that was open; a closed one (after a failed deploy) stays closed.
+    if [[ "$running_public" == 1 ]]; then dc up -d --pull never >&2 && return 0; else dc maint up -d --pull never >&2 && return 0; fi
+  fi
   if [[ -n "$running" ]]; then
     # shellcheck disable=SC2086
     docker start $running >&2 && return 0
