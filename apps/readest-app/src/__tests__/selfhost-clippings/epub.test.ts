@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unzipSync, strFromU8 } from 'fflate';
@@ -26,6 +26,7 @@ import type { LocalImage, ScannedFile } from '../../../../../selfhost/clippings/
 import { partialMD5Bytes } from '../../../../../selfhost/cli/lib/hash.ts';
 import { syncDeps } from './helpers';
 import type { RunCall } from './helpers';
+import { DAY, world } from './world';
 
 vi.mock('foliate-js/paginator.js', () => ({}));
 
@@ -73,7 +74,7 @@ const build = async (
   const scanned = scannedOf(md, local);
   const built = buildMeta(relpath, md, scanned.srcKey);
   const doc = await parseBody(s.deps, built.body);
-  return buildEpub({
+  const epub = await buildEpub({
     relpath,
     scanned,
     built,
@@ -82,6 +83,7 @@ const build = async (
     tmpDir: join(dir, 'tmp'),
     deps: s.deps,
   });
+  return { ...epub, doc };
 };
 
 const epubInput = (calls: RunCall[]): PandocDoc =>
@@ -107,6 +109,8 @@ const DATED = '---\ntitle: Dated\npublished: 2026-11-11\n---\nOne word here.\n';
 
 describe.skipIf(!pandocVersion)(
   `buildEpub on real pandoc (${pandocVersion || 'pandoc not installed'})`,
+  // Up to 6 pandoc processes a test: a loaded machine slows each spawn, not the code under test.
+  { timeout: 30_000 },
   () => {
     it('every kind of image becomes a local Image; no raw HTML; a missing one a link', async () => {
       const s = await setup();
@@ -139,7 +143,7 @@ describe.skipIf(!pandocVersion)(
       expect(links).toEqual(['https://x.test/gone.png']);
       expect(r.missingImages).toEqual(['https://x.test/gone.png']);
       expect(r.imagesComplete, 'gone does not count').toBe(true);
-      expect(collectImageUrls(await parseBody(s.deps, md))).toEqual([
+      expect(collectImageUrls(r.doc)).toEqual([
         'https://x.test/a.png',
         'https://x.test/r.png',
         'https://x.test/d.png',
@@ -182,11 +186,15 @@ describe.skipIf(!pandocVersion)(
       }
     });
 
-    it('one word changed: another partialMD5, also with an image over 1 MiB', async () => {
+    it('one word changed: another partialMD5', async () => {
       const s = await setup();
       const a = await build(s, 'a.md', DATED);
       const b = await build(s, 'a.md', DATED.replace('word', 'Word'));
       expect(partialMD5Bytes(b.bytes)).not.toBe(partialMD5Bytes(a.bytes));
+    });
+
+    it('one word changed: another book hash with an image over 1 MiB', async () => {
+      const s = await setup();
       const big = new Uint8Array(randomBytes(1536 * 1024));
       big.set(PNG);
       s.cache.record('https://x.test/big.png', { kind: 'ok', bytes: big, ext: 'png' }, 1);
@@ -266,6 +274,30 @@ describe.skipIf(!pandocVersion)(
       expect(strs(doc)).toEqual(
         expect.arrayContaining(['До', '[встроенное', 'содержимое]', 'После']),
       );
+    });
+
+    it('a sync run on real pandoc: uploaded; a rerun a day later does nothing; an edit replaces it', async () => {
+      const W = world();
+      try {
+        W.w.pandoc = (args, opts) => spawnRun('pandoc', args, opts);
+        const src = (body: string) => `---\ntitle: A\n---\nText <b>bold</b> ![](p.png) ${body}\n`;
+        W.put('a.md', src('v1'));
+        writeFileSync(join(W.w.vault, 'p.png'), PNG);
+        const r = await W.sync();
+        expect(r.code, r.err).toBe(0);
+        expect(r.out).toMatch(/^uploaded a\.md — /);
+        const h = W.state().files['a.md']!.bookHash;
+        expect(W.live().map((b) => b.hash)).toEqual([h]);
+        W.w.t += DAY;
+        expect((await W.sync()).out).toBe('итог: +0 ~0 -0, отложено 0, ошибок 0\n');
+        W.put('a.md', src('v2'));
+        const e = await W.sync();
+        expect(e.out).toMatch(/^replaced a\.md — /);
+        expect(W.live().map((b) => b.hash)).toEqual([W.state().files['a.md']!.bookHash]);
+        expect(W.state().files['a.md']!.bookHash).not.toBe(h);
+      } finally {
+        W.cleanup();
+      }
     });
 
     it('pandoc reporting a fetch is an error of the file', async () => {

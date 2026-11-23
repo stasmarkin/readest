@@ -1,5 +1,4 @@
-// A whole sync run in tmp: real pandoc, a fake readest library, scripted web and levi.
-import { execFileSync } from 'node:child_process';
+// A whole sync run in tmp: a fake pandoc, a fake readest library, scripted web and levi.
 import {
   mkdirSync,
   mkdtempSync,
@@ -12,10 +11,10 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { main } from '../../../../../selfhost/clippings/clippings-sync.ts';
-import { spawnRun } from '../../../../../selfhost/clippings/lib/deps.ts';
 import type { RunOpts, RunResult, SyncDeps } from '../../../../../selfhost/clippings/lib/deps.ts';
 import type { State } from '../../../../../selfhost/clippings/lib/state.ts';
 import { partialMD5Bytes } from '../../../../../selfhost/cli/lib/hash.ts';
+import { fakePandoc } from './fake-pandoc';
 import { syncDeps } from './helpers';
 import type { RunCall } from './helpers';
 
@@ -35,15 +34,6 @@ const res = (code: number, stdout: unknown = '', stderr = ''): RunResult => ({
 });
 
 export const HOUR = 60 * 60 * 1000;
-/** These runs build real EPUBs: without pandoc they are skipped, as epub.test is. */
-export const hasPandoc = (() => {
-  try {
-    execFileSync('pandoc', ['--version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 export const DAY = 24 * HOUR;
 
 export const world = () => {
@@ -70,6 +60,7 @@ export const world = () => {
       throw new TypeError('network');
     }) as typeof fetch,
     over: {} as Partial<SyncDeps>,
+    pandoc: fakePandoc,
   };
 
   const flag = (args: string[], name: string) => {
@@ -147,7 +138,7 @@ export const world = () => {
   };
 
   const run = async (cmd: string, args: string[], opts: RunOpts): Promise<RunResult> => {
-    if (cmd === 'pandoc') return spawnRun(cmd, args, opts);
+    if (cmd === 'pandoc') return w.pandoc(args, opts);
     if (cmd === 'web') return w.web(args);
     if (cmd === 'levi') return w.levi(args);
     if (cmd === 'readest') {

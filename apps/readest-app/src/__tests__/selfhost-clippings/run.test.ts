@@ -1,15 +1,16 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { strFromU8, unzipSync } from 'fflate';
 import { buildEpub, parseBody } from '../../../../../selfhost/clippings/lib/epub.ts';
-import { spawnRun } from '../../../../../selfhost/clippings/lib/deps.ts';
 import { loadImageCache } from '../../../../../selfhost/clippings/lib/images.ts';
 import { buildMeta } from '../../../../../selfhost/clippings/lib/meta.ts';
 import { scanVault } from '../../../../../selfhost/clippings/lib/scan.ts';
 import type { SyncDeps } from '../../../../../selfhost/clippings/lib/deps.ts';
 import type { State } from '../../../../../selfhost/clippings/lib/state.ts';
+import { fakePandoc } from './fake-pandoc';
 import { syncDeps } from './helpers';
-import { DAY, hasPandoc, HOUR, world } from './world';
+import { DAY, HOUR, world } from './world';
 import type { World } from './world';
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
@@ -30,15 +31,15 @@ const liveFor = (W: World, rel: string) => {
   return W.live().filter((b) => b.hash === h);
 };
 
-/** The hash this file will build to: the build is deterministic. */
-const expectedHash = async (W: World, rel: string) => {
-  const s = syncDeps(W.w.root, { run: spawnRun });
+/** The book this file will build to: the build is deterministic. */
+const buildOf = async (W: World, rel: string) => {
+  const s = syncDeps(W.w.root, { run: (_cmd, args, opts) => fakePandoc(args, opts) });
   const scan = await scanVault(s.deps, W.w.vault);
   const f = scan.files.get(rel)!;
   const built = buildMeta(rel, new TextDecoder().decode(f.bytes), f.srcKey);
   const doc = await parseBody(s.deps, built.body);
   const cache = await loadImageCache(s.deps, join(W.w.root, 'scratch-images'));
-  const e = await buildEpub({
+  return buildEpub({
     relpath: rel,
     scanned: f,
     built,
@@ -47,10 +48,52 @@ const expectedHash = async (W: World, rel: string) => {
     tmpDir: join(W.w.root, 'scratch'),
     deps: s.deps,
   });
-  return e.bookHash;
 };
+const expectedHash = async (W: World, rel: string) => (await buildOf(W, rel)).bookHash;
 
-describe.skipIf(!hasPandoc)('runSync: basics', () => {
+describe('the fake pandoc', () => {
+  it('builds an EPUB the sync reads: the same source, the same book; text, image and srcKey change it', async () => {
+    const W = mk();
+    W.put('a.md', md('A', 'one ![](p.png)'));
+    writeFileSync(join(W.w.vault, 'p.png'), PNG);
+    const a = await buildOf(W, 'a.md');
+    expect(a.title).toBe('A');
+    expect(a.metaHash).toMatch(/^[0-9a-f]{32}$/);
+    expect((await buildOf(W, 'a.md')).epubSha256, 'deterministic').toBe(a.epubSha256);
+    const png2 = new Uint8Array([...PNG, 1]);
+    // srcKey (in dc:relation) changes with text and image too: the content is checked on its own.
+    const variants: Array<[string, () => void, (zip: Record<string, Uint8Array>) => void]> = [
+      [
+        'text',
+        () => W.put('a.md', md('A', 'two ![](p.png)')),
+        (zip) => expect(strFromU8(zip['t.xhtml']!)).toContain('<p>two <img'),
+      ],
+      [
+        'image',
+        () => writeFileSync(join(W.w.vault, 'p.png'), png2),
+        (zip) => expect(Object.entries(zip).find(([n]) => n.startsWith('loc-'))?.[1]).toEqual(png2),
+      ],
+      [
+        'srcKey only',
+        () => W.put('a.md', `---\ntitle: A\nextra: x\n---\ntwo ![](p.png)\n`),
+        () => {},
+      ],
+    ];
+    const seen = new Set([a.bookHash]);
+    for (const [what, change, check] of variants) {
+      change();
+      const b = await buildOf(W, 'a.md');
+      expect(seen.has(b.bookHash), what).toBe(false);
+      expect(b.metaHash, `${what}: the same metadata`).toBe(a.metaHash);
+      check(unzipSync(b.bytes));
+      seen.add(b.bookHash);
+    }
+    W.put('a.md', md('B'));
+    expect((await buildOf(W, 'a.md')).metaHash, 'another title').not.toBe(a.metaHash);
+  });
+});
+
+describe('runSync: basics', () => {
   it('first run uploads into Clippings with --expect-user and --expect-meta; a rerun does nothing', async () => {
     const W = mk();
     W.put('a.md', md('A'));
@@ -158,7 +201,7 @@ const stateWrites =
     writeFileSync(path, data);
   };
 
-describe.skipIf(!hasPandoc)('runSync: changes', () => {
+describe('runSync: changes', () => {
   it('a replaced local image replaces the book', async () => {
     const W = mk();
     W.put('a.md', md('A', '![](pic.png)'));
@@ -186,7 +229,7 @@ describe.skipIf(!hasPandoc)('runSync: changes', () => {
   });
 });
 
-describe.skipIf(!hasPandoc)('runSync: journal', () => {
+describe('runSync: journal', () => {
   const crashPoints: Array<[string, (W: World) => Partial<SyncDeps> | 'readest']> = [
     [
       'writing the outbox tmp',
@@ -373,7 +416,7 @@ describe.skipIf(!hasPandoc)('runSync: journal', () => {
   });
 });
 
-describe.skipIf(!hasPandoc)('runSync: ownership', () => {
+describe('runSync: ownership', () => {
   it('a live book with the built hash that is not ours: conflict, upload never called', async () => {
     const W = mk();
     W.put('a.md', md('A'));
@@ -524,7 +567,7 @@ const pngAnswer = (url: string) => ({
 });
 const webCalls = (calls: World['w']['calls']) => calls.filter((c) => c.cmd === 'web');
 
-describe.skipIf(!hasPandoc)('runSync: manual deletion', () => {
+describe('runSync: manual deletion', () => {
   it('a book gone from the library: optOut; never touched again, edited, gone or back', async () => {
     const W = mk();
     W.put('a.md', md('A'));
@@ -578,7 +621,7 @@ describe.skipIf(!hasPandoc)('runSync: manual deletion', () => {
   });
 });
 
-describe.skipIf(!hasPandoc)('runSync: deferral and rebuild', () => {
+describe('runSync: deferral and rebuild', () => {
   for (const [name, setup] of [
     ['an intranet image without Chromium', (W: World) => W.put('a.md', md('A', `![](${ESOC})`))],
     [
@@ -700,7 +743,7 @@ describe.skipIf(!hasPandoc)('runSync: deferral and rebuild', () => {
   });
 });
 
-describe.skipIf(!hasPandoc)('runSync: login', () => {
+describe('runSync: login', () => {
   it('whoami exit 3: the login hint on stderr, exit 3', async () => {
     const W = mk();
     W.put('a.md', md('A'));
@@ -768,7 +811,7 @@ describe.skipIf(!hasPandoc)('runSync: login', () => {
   });
 });
 
-describe.skipIf(!hasPandoc)('runSync: guards', () => {
+describe('runSync: guards', () => {
   it('an empty vault: no deletes, exit 2; --allow-mass-delete deletes', async () => {
     const W = mk();
     W.put('a.md', md('A'));
@@ -923,7 +966,7 @@ describe.skipIf(!hasPandoc)('runSync: guards', () => {
   });
 });
 
-describe.skipIf(!hasPandoc)('runSync: lock', () => {
+describe('runSync: lock', () => {
   const renameThen = (W: World, when: (s: State) => boolean) => ({
     rename: async (a: string, b: string) => {
       const { renameSync } = await import('node:fs');
@@ -972,7 +1015,7 @@ describe.skipIf(!hasPandoc)('runSync: lock', () => {
   });
 });
 
-describe.skipIf(!hasPandoc)('runSync: output', () => {
+describe('runSync: output', () => {
   it('a mixed run: one line per action in order, then the total; exit 1', async () => {
     const W = mk();
     W.put('d-change.md', md('D'));
