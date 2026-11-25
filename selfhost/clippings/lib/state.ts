@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { AuthRequiredError, CliError } from '../../cli/lib/errors.ts';
 import type { SyncDeps } from './deps.ts';
 
@@ -58,6 +58,60 @@ const STATE = 'state.json';
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
+export const BOOK_HASH = /^[0-9a-f]{32}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
+
+/** The journal steers uploads and recursive outbox removal, so a bad entry stops the run instead. */
+export const opProblem = (op: unknown, history: Record<string, unknown> = {}): string | null => {
+  if (!isObject(op)) return 'not an object';
+  const relpath = op['relpath'];
+  if (
+    typeof relpath !== 'string' ||
+    !relpath ||
+    isAbsolute(relpath) ||
+    relpath.split(/[\\/]/).includes('..')
+  )
+    return 'bad relpath';
+  const hex = (k: string) => typeof op[k] === 'string' && BOOK_HASH.test(op[k] as string);
+  // Only books this sync created may be uploaded over or deleted by a journal entry.
+  const ours = (k: string) =>
+    typeof op[k] === 'string' &&
+    Object.hasOwn(history, op[k] as string) &&
+    history[op[k] as string] === relpath;
+  if (op['kind'] === 'delete')
+    return !hex('oldHash') ? 'bad oldHash' : ours('oldHash') ? null : 'oldHash not ours';
+  if (op['kind'] !== 'upload' && op['kind'] !== 'replace') return 'bad kind';
+  if (!hex('newHash')) return 'bad newHash';
+  if (op['kind'] === 'replace' && !hex('oldHash')) return 'bad oldHash';
+  if (!ours('newHash') || (op['kind'] === 'replace' && !ours('oldHash'))) return 'hash not ours';
+  const epub = op['epub'];
+  const parts = typeof epub === 'string' ? epub.split('/') : [];
+  if (
+    parts.length !== 3 ||
+    parts[0] !== 'outbox' ||
+    parts[1] !== op['newHash'] ||
+    !/^[^/\\]+\.epub$/.test(parts[2]!) ||
+    parts[2]!.startsWith('.')
+  )
+    return 'bad epub path';
+  const rec = op['record'];
+  if (
+    !isObject(rec) ||
+    rec['bookHash'] !== op['newHash'] ||
+    typeof rec['metaHash'] !== 'string' ||
+    typeof rec['epubSha256'] !== 'string' ||
+    !SHA256.test(rec['epubSha256']) ||
+    typeof rec['srcKey'] !== 'string' ||
+    typeof rec['title'] !== 'string' ||
+    typeof rec['syncedAt'] !== 'number' ||
+    typeof rec['imagesComplete'] !== 'boolean' ||
+    !Array.isArray(rec['missingImages']) ||
+    !rec['missingImages'].every((u) => typeof u === 'string')
+  )
+    return 'bad record';
+  return null;
+};
+
 export const loadState = async (deps: SyncDeps, dir: string): Promise<State> => {
   let text: string;
   try {
@@ -80,6 +134,11 @@ export const loadState = async (deps: SyncDeps, dir: string): Promise<State> => 
   }
   if (!Array.isArray(v['ops']))
     throw new CliError(`state is damaged (ops): ${join(dir, STATE)}`, 2);
+  const history = v['history'] as Record<string, unknown>;
+  v['ops'].forEach((op, i) => {
+    const why = opProblem(op, history);
+    if (why) throw new CliError(`state is damaged (ops[${i}]: ${why}): ${join(dir, STATE)}`, 2);
+  });
   return v as State;
 };
 

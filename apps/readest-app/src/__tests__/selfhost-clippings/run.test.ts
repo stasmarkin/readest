@@ -310,6 +310,41 @@ describe('runSync: journal', () => {
     expect(W.outbox()).toEqual([]);
   });
 
+  it('a damaged journal entry stops the run: exit 2, nothing in the outbox removed, no upload', async () => {
+    const W = mk();
+    W.put('a.md', md('A'));
+    await W.sync();
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(join(W.w.stateDir, 'outbox', 'f'.repeat(32)), { recursive: true });
+    writeFileSync(join(W.w.stateDir, 'outbox', 'f'.repeat(32), 'x.epub'), 'keep');
+    const s = W.state();
+    const rec = s.files['a.md']!;
+    s.ops = [{ kind: 'upload', relpath: 'a.md', epub: 'outbox//x.epub', newHash: '', record: rec }];
+    W.writeState(s);
+    const r = await W.sync();
+    expect(r.code).toBe(2);
+    expect(W.outbox(), 'outbox untouched').toEqual(['f'.repeat(32)]);
+    expect(W.readestCalls(r.calls, 'upload')).toEqual([]);
+    expect(W.state().ops, 'journal kept').toHaveLength(1);
+  });
+
+  it('an outbox file changed under a journalled upload: exit 2, journal and file kept', async () => {
+    const W = mk();
+    W.put('a.md', md('A'));
+    W.w.readestHook = (a) => (a[0] === 'upload' ? 'after-throw' : undefined);
+    await W.sync();
+    const op = W.state().ops[0]!;
+    expect(op.kind).toBe('upload');
+    W.w.readestHook = undefined;
+    const path = join(W.w.stateDir, (op as { epub: string }).epub);
+    writeFileSync(path, 'tampered');
+    const r = await W.sync();
+    expect(r.code).toBe(2);
+    expect(W.readestCalls(r.calls, 'upload')).toEqual([]);
+    expect(W.state().ops).toEqual([op]);
+    expect(readFileSync(path, 'utf8')).toBe('tampered');
+  });
+
   it('a foreign file in the outbox is not removed', async () => {
     const W = mk();
     W.put('a.md', md('A'));
@@ -417,6 +452,36 @@ describe('runSync: journal', () => {
 });
 
 describe('runSync: ownership', () => {
+  it('start from scratch (group and state removed): the same builds revive as ours, no conflict', async () => {
+    const W = mk();
+    W.put('a.md', md('A'));
+    W.put('b.md', md('B'));
+    await W.sync();
+    const before = W.state().files;
+    for (const b of W.w.books.values()) b.deleted = true;
+    rmSync(W.w.stateDir, { recursive: true, force: true });
+    const r = await W.sync();
+    expect(r.out).not.toContain('conflict');
+    expect(r.code).toBe(0);
+    const after = W.state().files;
+    expect(after['a.md']!.bookHash).toBe(before['a.md']!.bookHash);
+    expect(after['b.md']!.bookHash).toBe(before['b.md']!.bookHash);
+    expect(W.live()).toHaveLength(2);
+  });
+
+  it('state lost, books alive: the same builds are taken back, no conflict, no new books', async () => {
+    const W = mk();
+    W.put('a.md', md('A'));
+    await W.sync();
+    const hash = W.state().files['a.md']!.bookHash;
+    rmSync(W.w.stateDir, { recursive: true, force: true });
+    const r = await W.sync();
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain('conflict');
+    expect(W.state().files['a.md']!.bookHash).toBe(hash);
+    expect(W.live()).toHaveLength(1);
+  });
+
   it('a live book with the built hash that is not ours: conflict, upload never called', async () => {
     const W = mk();
     W.put('a.md', md('A'));

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { hash7 } from '../../cli/lib/books.ts';
 import { AuthRequiredError, CliError } from '../../cli/lib/errors.ts';
@@ -14,7 +14,7 @@ import { readestBooks, readestDelete, readestUpload, readestWhoami, GROUP } from
 import type { CliOutcome } from './readest.ts';
 import { scanVault } from './scan.ts';
 import type { Scan } from './scan.ts';
-import { checkIdentity, loadState, saveState } from './state.ts';
+import { BOOK_HASH, checkIdentity, loadState, saveState } from './state.ts';
 import type { FileRecord, Held, Op } from './state.ts';
 import { downloadImages, webSession } from './web.ts';
 import type { WebSession } from './web.ts';
@@ -176,8 +176,13 @@ const syncLocked = async (
     }
     if (item.hash !== op.newHash)
       return { kind: 'fileError', reason: `hash mismatch: ${item.hash}` };
-    // An existing book under this hash is ours only if we made it, or this is our own retry.
-    if (step !== 'uploaded' && !ownedBefore && !recovering) {
+    // An existing book under this hash is ours if we made it, this is our own retry, or it carries our metaHash.
+    if (
+      step !== 'uploaded' &&
+      !ownedBefore &&
+      !recovering &&
+      item.metaHash !== op.record.metaHash
+    ) {
       return {
         kind: 'fileError',
         reason: `conflict: ${step} book ${hash7(op.newHash)} is not ours`,
@@ -186,7 +191,10 @@ const syncLocked = async (
     return out;
   };
 
-  const outboxDir = (hash: string) => join(stateDir, 'outbox', hash);
+  const outboxDir = (hash: string) => {
+    if (!BOOK_HASH.test(hash)) throw new CliError(`refusing outbox path for hash "${hash}"`, 2);
+    return join(stateDir, 'outbox', hash);
+  };
 
   /** Journal step 4 and 5 (or the undo of a file error): the registry, then the outbox. */
   const settle = async (op: Op, out: CliOutcome, recovering: boolean, ownedBefore: boolean) => {
@@ -259,6 +267,15 @@ const syncLocked = async (
         deps.stdout(`незавершённая операция: ${op.kind} ${op.relpath}\n`);
         continue;
       }
+      if (op.kind !== 'delete') {
+        const bytes = await deps.readFile(join(stateDir, op.epub)).catch(() => null);
+        if (!bytes || createHash('sha256').update(bytes).digest('hex') !== op.record.epubSha256) {
+          throw new CliError(
+            `outbox damaged for ${op.relpath}: ${op.epub} is missing or changed; journal kept`,
+            2,
+          );
+        }
+      }
       const out = await exec(op, true, true);
       await settle(op, out, true, true);
       report(op, out, 'recovered', op.kind);
@@ -269,9 +286,11 @@ const syncLocked = async (
       return 1;
     }
 
-    const live = new Set((await readestBooks(deps, userId)).map((b) => b.hash));
+    const live = new Map(
+      (await readestBooks(deps, userId)).map((b) => [b.hash, b.metaHash ?? null]),
+    );
     const scan: Scan = await scanVault(deps, vault);
-    const plan = classify(state, scan, live, now());
+    const plan = classify(state, scan, new Set(live.keys()), now());
 
     // An empty or partial snapshot must not opt every book out for good.
     const registered = Object.keys(state.files).length;
@@ -415,7 +434,12 @@ const syncLocked = async (
             fail(c.relpath, 'hash collision: the new EPUB has the old book hash');
             continue;
           }
-          if (live.has(epub.bookHash) && !(epub.bookHash in state.history)) {
+          // Same hash and same metaHash (identifier = this relpath) is this sync's own earlier build.
+          if (
+            live.has(epub.bookHash) &&
+            !(epub.bookHash in state.history) &&
+            live.get(epub.bookHash) !== epub.metaHash
+          ) {
             fail(
               c.relpath,
               `conflict: book ${hash7(epub.bookHash)} is in the library but not ours`,
