@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import {
   existsSync,
   linkSync,
@@ -1039,10 +1039,17 @@ describe('ApiClient: expected user, ping, objects', () => {
       expiresAt: Math.floor(f.deps.now() / 1000) + 3600,
     });
 
-    const g = apiDeps((_url, init) =>
-      bearer(init) === 'Bearer at-1'
-        ? json(401, { error: 'Not authenticated' })
-        : json(200, { books: [] }),
+    // Every Date.now() lands in a new second, so any wall-clock dependence in the expectation fails here.
+    let tick = Math.floor(Date.now() / 1000) * 1000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => (tick += 1000));
+    onTestFinished(() => nowSpy.mockRestore());
+    const issuedMs = Date.UTC(2030, 0, 1);
+    const g = apiDeps(
+      (_url, init) =>
+        bearer(init) === 'Bearer at-1'
+          ? json(401, { error: 'Not authenticated' })
+          : json(200, { books: [] }),
+      () => tokenResponse(2, issuedMs),
     );
     writeSession(
       g.deps,
@@ -1051,7 +1058,7 @@ describe('ApiClient: expected user, ping, objects', () => {
     const refreshed = new ApiClient(g.deps, PROFILE);
     await refreshed.ping();
     expect(refreshed.sessionInfo().expiresAt, 'the refreshed session, not the rejected one').toBe(
-      Math.floor(Date.now() / 1000) + 3600,
+      issuedMs / 1000 + 3600,
     );
 
     const h = apiDeps(() => json(401, { error: 'Not authenticated' }));
