@@ -13,6 +13,7 @@ import {
 import { isAuthRetryableFetchError, User } from '@supabase/supabase-js';
 import { supabase } from '@/utils/supabase';
 import { claimGiftCards } from '@/libs/payment/gift/client';
+import { isSelfHosted } from '@/utils/access';
 import { fetchSyncDevices, hasDeviceLimit } from '@/libs/syncDevices';
 import posthog from 'posthog-js';
 
@@ -157,6 +158,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       localStorage.setItem('user', JSON.stringify(newUser));
       // Gift cards bought for this email reach the account at sign-in; the
       // refreshed session then carries the gifted plan.
+      if (isSelfHosted()) return;
       claimGiftCards()
         .then((claimed) => (claimed > 0 ? refresh() : undefined))
         .catch((error) => console.error('Failed to claim gift cards:', error));

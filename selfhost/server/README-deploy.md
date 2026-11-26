@@ -23,4 +23,4 @@ Cron `30 4 * * * /opt/readest/backup.sh >> /opt/readest/backups/backup.log 2>&1`
 
 ## Exposure
 
-Only what native clients need is routed: `/api/*` (minus `/api/opds/` and `/api/stripe/`), `/auth/v1/`, `/rest/v1/`, `/readest-files/`, `/.well-known/readest-client-config.json`. Everything else, including the browser UI, returns 404 from the `wellknown` nginx catch-all. All public tables have RLS; anonymous REST reads return empty lists.
+Only what native clients need is routed: `/api/*` (minus `/api/opds/`, `/api/stripe/` and `/api/gift/`), `/auth/v1/`, `/rest/v1/`, `/readest-files/`, `/.well-known/readest-client-config.json`. Everything else, including the browser UI, returns 404 from the `wellknown` nginx catch-all. All public tables have RLS; anonymous REST reads return empty lists.

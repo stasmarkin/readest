@@ -42,6 +42,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
 });
 
 it('claims gift cards on login and refreshes the session when one was claimed', async () => {
@@ -70,4 +71,13 @@ it('logs and swallows a failed claim', async () => {
   );
   expect(h.refreshSession).not.toHaveBeenCalled();
   consoleError.mockRestore();
+});
+
+it('does not claim gift cards on login in a self-hosted build', async () => {
+  vi.stubEnv('NEXT_PUBLIC_SELF_HOSTED', 'true');
+  h.claimGiftCards.mockResolvedValue(1);
+  await signIn();
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(h.claimGiftCards).not.toHaveBeenCalled();
 });

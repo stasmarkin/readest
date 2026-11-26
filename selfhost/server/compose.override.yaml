@@ -44,7 +44,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=coolify
-      - traefik.http.routers.readest-web.rule=Host(`readest.stasmarkin.ru`) && PathPrefix(`/api/`) && !PathPrefix(`/api/opds/`) && !PathPrefix(`/api/stripe/`)
+      - traefik.http.routers.readest-web.rule=Host(`readest.stasmarkin.ru`) && PathPrefix(`/api/`) && !PathPrefix(`/api/opds/`) && !PathPrefix(`/api/stripe/`) && !PathPrefix(`/api/gift/`)
       - traefik.http.routers.readest-web.entryPoints=https
       - traefik.http.routers.readest-web.tls=true
       - traefik.http.routers.readest-web.tls.certresolver=letsencrypt

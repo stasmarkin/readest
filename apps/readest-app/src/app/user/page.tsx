@@ -79,9 +79,12 @@ const ProfilePage = () => {
     () => searchParams?.get('section') === 'sync',
   );
   // Read once: the code is taken out of the URL as soon as the page opens.
-  const [giftCode] = useState(() => searchParams?.get('gift') || undefined);
+  const [giftCode] = useState(() =>
+    isSelfHosted() ? undefined : searchParams?.get('gift') || undefined,
+  );
   // A gift link opens redeeming; a returning gift checkout opens buying.
   const [giftView, setGiftView] = useState<GiftCardsView | null>(() => {
+    if (isSelfHosted()) return null;
     const section = searchParams?.get('section');
     if (giftCode || section === 'redeem') return 'redeem';
     return section === 'gifts' ? 'give' : null;
@@ -157,7 +160,7 @@ const ProfilePage = () => {
   // what sets the plan, for the plan cards and Manage Subscription.
   const signedIn = !!(user && token);
   useEffect(() => {
-    if (!signedIn) return;
+    if (!signedIn || isSelfHosted()) return;
     const claimThenLoad = async () => {
       try {
         if ((await claimGiftCards()) > 0) await refresh();
@@ -182,7 +185,7 @@ const ProfilePage = () => {
   const [giftPrices, setGiftPrices] = useState<GiftPrice[]>([]);
   const giftsThroughIAP = appService?.hasIAP;
   useEffect(() => {
-    if (giftsThroughIAP === undefined) return;
+    if (giftsThroughIAP === undefined || isSelfHosted()) return;
     let stale = false;
     fetchGiftPrices(giftsThroughIAP)
       .then((next) => {
@@ -562,7 +565,7 @@ const ProfilePage = () => {
                         onManageStorage={handleManageStorage}
                         onManageSharedLinks={handleManageSharedLinks}
                         onManageSync={handleManageSync}
-                        onRedeemGiftCard={handleRedeemGiftCard}
+                        onRedeemGiftCard={isSelfHosted() ? undefined : handleRedeemGiftCard}
                       />
                     </div>
                   </>
