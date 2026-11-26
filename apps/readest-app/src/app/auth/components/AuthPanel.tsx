@@ -5,6 +5,7 @@ import { FcGoogle } from 'react-icons/fc';
 import { FaApple, FaGithub, FaDiscord } from 'react-icons/fa';
 import { MdQrCode2 } from 'react-icons/md';
 import { useTranslation } from '@/hooks/useTranslation';
+import { isSelfHosted } from '@/utils/access';
 import { ProviderLogin, SignInButton, type OAuthProvider } from './ProviderLogin';
 import CodeSignIn from './CodeSignIn';
 import EmailPasswordAuth from './EmailPasswordAuth';
@@ -24,6 +25,9 @@ export default function AuthPanel({
   onProviderSignIn,
 }: AuthPanelProps) {
   const _ = useTranslation();
+  // A self-hosted server signs in with email and password only: no OAuth
+  // providers, no mail for magic links, and its /link page isn't public.
+  const selfHosted = isSelfHosted();
   const [codeSignIn, setCodeSignIn] = useState(false);
   // `signInWithOAuth` redirects the whole page on web, which can cut off the
   // opt-in's settings write. Hold sign-in until it has landed. Null until the
@@ -49,46 +53,50 @@ export default function AuthPanel({
         <CodeSignIn supabaseClient={supabaseClient} onCancel={() => setCodeSignIn(false)} />
       ) : (
         <>
-          <div className='flex w-full flex-col gap-2.5'>
-            <ProviderLogin
-              provider='google'
-              handleSignIn={handleProviderSignIn}
-              Icon={FcGoogle}
-              label={_('Sign in with {{provider}}', { provider: 'Google' })}
-            />
-            <ProviderLogin
-              provider='apple'
-              handleSignIn={handleProviderSignIn}
-              Icon={FaApple}
-              label={_('Sign in with {{provider}}', { provider: 'Apple' })}
-            />
-            <ProviderLogin
-              provider='github'
-              handleSignIn={handleProviderSignIn}
-              Icon={FaGithub}
-              label={_('Sign in with {{provider}}', { provider: 'GitHub' })}
-            />
-            <ProviderLogin
-              provider='discord'
-              handleSignIn={handleProviderSignIn}
-              Icon={FaDiscord}
-              label={_('Sign in with {{provider}}', { provider: 'Discord' })}
-            />
-            <SignInButton
-              Icon={MdQrCode2}
-              label={_('Sign in with a QR code')}
-              onClick={() => setCodeSignIn(true)}
-            />
-          </div>
-          <div className='flex w-full items-center gap-3' aria-hidden='true'>
-            <hr className='border-base-300 flex-1 border-t' />
-            <span className='text-base-content/50 text-xs'>{_('or continue with email')}</span>
-            <hr className='border-base-300 flex-1 border-t' />
-          </div>
+          {!selfHosted && (
+            <>
+              <div className='flex w-full flex-col gap-2.5'>
+                <ProviderLogin
+                  provider='google'
+                  handleSignIn={handleProviderSignIn}
+                  Icon={FcGoogle}
+                  label={_('Sign in with {{provider}}', { provider: 'Google' })}
+                />
+                <ProviderLogin
+                  provider='apple'
+                  handleSignIn={handleProviderSignIn}
+                  Icon={FaApple}
+                  label={_('Sign in with {{provider}}', { provider: 'Apple' })}
+                />
+                <ProviderLogin
+                  provider='github'
+                  handleSignIn={handleProviderSignIn}
+                  Icon={FaGithub}
+                  label={_('Sign in with {{provider}}', { provider: 'GitHub' })}
+                />
+                <ProviderLogin
+                  provider='discord'
+                  handleSignIn={handleProviderSignIn}
+                  Icon={FaDiscord}
+                  label={_('Sign in with {{provider}}', { provider: 'Discord' })}
+                />
+                <SignInButton
+                  Icon={MdQrCode2}
+                  label={_('Sign in with a QR code')}
+                  onClick={() => setCodeSignIn(true)}
+                />
+              </div>
+              <div className='flex w-full items-center gap-3' aria-hidden='true'>
+                <hr className='border-base-300 flex-1 border-t' />
+                <span className='text-base-content/50 text-xs'>{_('or continue with email')}</span>
+                <hr className='border-base-300 flex-1 border-t' />
+              </div>
+            </>
+          )}
           <EmailPasswordAuth
             supabaseClient={supabaseClient}
             redirectTo={redirectTo}
-            magicLink={magicLink}
+            magicLink={magicLink && !selfHosted}
           />
         </>
       )}
