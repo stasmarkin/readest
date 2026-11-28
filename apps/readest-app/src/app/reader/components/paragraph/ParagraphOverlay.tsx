@@ -226,7 +226,7 @@ const ParagraphOverlay: React.FC<ParagraphOverlayProps> = ({
     return {
       fontFamily: defaultFontFamily,
       fontSize: `${(viewSettings.defaultFontSize || 16) * fontScale}px`,
-      lineHeight: viewSettings.lineHeight || 1.6,
+      lineHeight: (viewSettings.lineHeight || 1.6) * (viewSettings.lineHeightScale ?? 1),
       letterSpacing: viewSettings.letterSpacing ? `${viewSettings.letterSpacing}px` : undefined,
       wordSpacing: viewSettings.wordSpacing ? `${viewSettings.wordSpacing}px` : undefined,
       fontWeight: viewSettings.fontWeight || 400,

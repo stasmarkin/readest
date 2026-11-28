@@ -847,6 +847,19 @@ const getPageLayoutStyles = (
 // panel. Gated by BookStyle.useBookLayout: when true, this chunk is skipped
 // and the book's own paragraph formatting takes over.
 const CJK_LANGS = ['zh', 'ja', 'ko'];
+
+// The Line Spacing Scale multiplies every line-height, the book's own included:
+// transformStylesheet rewrites each one against this variable, so moving the
+// slider restyles the page without reloading the section.
+const LINE_HEIGHT_SCALE_VAR = '--readest-line-height-scale';
+const scaledLineHeight = (value: number | string) =>
+  `calc(${value} * var(${LINE_HEIGHT_SCALE_VAR}, 1))`;
+// Under Use Book Layout no reader rule sets a line-height, so text the book
+// leaves at `normal` gets a zero-specificity base the scale can multiply.
+const getLineHeightScaleStyles = (scale: number, useBookLayout: boolean) => `
+  :root { ${LINE_HEIGHT_SCALE_VAR}: ${scale}; }
+  ${useBookLayout && scale !== 1 ? `:where(html) { line-height: ${scaledLineHeight(1.2)}; }` : ''}
+`;
 const CJK_LANG_SELECTOR = CJK_LANGS.map((lang) => `:lang(${lang})`).join(', ');
 const getParagraphLayoutStyles = (
   overrideLayout: boolean,
@@ -896,7 +909,7 @@ const getParagraphLayoutStyles = (
      this whole rule and reverts to the book's default line spacing, indent and
      hyphenation. */
   p, blockquote, dd, div:not(:has(*:not(${INLINE_FORMATTING_SELECTOR}))) {
-    line-height: ${lineSpacing} ${overrideLayout ? '!important' : ''};
+    line-height: ${scaledLineHeight(lineSpacing)} ${overrideLayout ? '!important' : ''};
     word-spacing: ${wordSpacing}px ${overrideLayout ? '!important' : ''};
     letter-spacing: ${letterSpacing}px ${overrideLayout ? '!important' : ''};
     text-indent: ${textIndent}em ${overrideLayout ? '!important' : ''};
@@ -912,7 +925,7 @@ const getParagraphLayoutStyles = (
      Override Book Layout drops the end side only: with ul { padding: 0 } the
      start side is what keeps an outside marker on the page. */
   li {
-    line-height: ${lineSpacing} ${overrideLayout ? '!important' : ''};
+    line-height: ${scaledLineHeight(lineSpacing)} ${overrideLayout ? '!important' : ''};
     -webkit-hyphens: ${hyphenate ? 'auto' : 'manual'} ${overrideLayout ? '!important' : ''};
     hyphens: ${hyphenate ? 'auto' : 'manual'} ${overrideLayout ? '!important' : ''};
     ${overrideLayout ? 'margin-inline-end: unset !important;' : ''}
@@ -1377,6 +1390,10 @@ export const getStyles = (
   const warichuStyles = getWarichuStyles();
   const rubyStyles = getRubyStyles(viewSettings);
   const cjkLineFlowStyles = getCJKLineFlowStyles();
+  const lineHeightScaleStyles = getLineHeightScaleStyles(
+    viewSettings.lineHeightScale ?? 1,
+    !!viewSettings.useBookLayout,
+  );
   const dialogueStyles = isDialogueHighlightActive(viewSettings)
     ? getDialogueHighlightStyles(viewSettings, themeCode)
     : '';
@@ -1387,7 +1404,7 @@ export const getStyles = (
   // the footnote aside's border show as a stray horizontal line (#4438). Keep it
   // ahead of the inlined custom `@font-face` rules.
   const epubNamespace = `@namespace epub "http://www.idpf.org/2007/ops";`;
-  return `${epubNamespace}\n${customFontFaces}\n${pageLayoutStyles}\n${paragraphLayoutStyles}\n${cjkLineFlowStyles}\n${fontStyles}\n${colorStyles}\n${dialogueStyles}\n${translationStyles}\n${warichuStyles}\n${rubyStyles}\n${userStylesheet}`;
+  return `${epubNamespace}\n${customFontFaces}\n${lineHeightScaleStyles}\n${pageLayoutStyles}\n${paragraphLayoutStyles}\n${cjkLineFlowStyles}\n${fontStyles}\n${colorStyles}\n${dialogueStyles}\n${translationStyles}\n${warichuStyles}\n${rubyStyles}\n${userStylesheet}`;
 };
 
 // Build a CSS chunk of `@font-face` rules for the given user custom
@@ -1555,12 +1572,86 @@ const scaleFontRelativeLengths = (css: string) => {
   return scaled.replace(/READEST_LEN_(\d+)_PLACEHOLDER/g, (_, i: string) => parked[+i]!);
 };
 
+// Only values that compute to a length or number are scaled: anything else
+// (a typo, `auto`, a var() that may hold `normal`) would turn valid once
+// wrapped and then compute to `normal`. `lh`/`rlh` already follow a scaled
+// line-height. Readest's own length variables are safe to multiply.
+const SCALABLE_LINE_HEIGHT =
+  /^(?:\+?(?:\d*\.)?\d+(?:e[+-]?\d+)?(?:%|r?(?:em|ex|ch|cap|ic)|px|pt|pc|cm|mm|in|q|[sdl]?v(?:[whib]|min|max))?|(?:calc|min|max|clamp)\([^;{}]*\))$/i;
+const READEST_LENGTH_VAR = /var\(--readest-(?:vw|vh|font-scale)\b/gi;
+const isScalableLineHeight = (value: string) =>
+  SCALABLE_LINE_HEIGHT.test(value) &&
+  !/var\(/i.test(value.replace(READEST_LENGTH_VAR, '')) &&
+  !/\dr?lh\b/i.test(value);
+
+// The `/line-height` part of a font shorthand: the first slash outside parentheses.
+const scaleFontShorthandLineHeight = (value: string) => {
+  let depth = 0;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    else if (ch === '/' && depth === 0) {
+      const start = i + 1 + (/^\s*/.exec(value.slice(i + 1))?.[0].length ?? 0);
+      let end = start;
+      for (let inner = 0; end < value.length; end++) {
+        const c = value[end]!;
+        if (c === '(') inner++;
+        else if (c === ')') inner--;
+        else if (/\s/.test(c) && inner === 0) break;
+      }
+      const lineHeight = value.slice(start, end);
+      // The shorthand is split into words on spaces, and calc() needs them
+      // around + and -, so a spaced expression is left as written.
+      if (/\s/.test(lineHeight) || !isScalableLineHeight(lineHeight)) return value;
+      const scaled = `calc(${lineHeight}*var(${LINE_HEIGHT_SCALE_VAR},1))`;
+      return value.slice(0, start) + scaled + value.slice(end);
+    }
+  }
+  return value;
+};
+
+/**
+ * Put the book's line-heights, in line-height declarations and in the font
+ * shorthand's `size/line-height`, under the Line Spacing Scale. Keywords and
+ * var() values are left alone: a variable may hold `normal`, which calc()
+ * can't multiply. A value that already reads the scale is skipped, so a
+ * repeated transform (#5277) doesn't scale twice.
+ */
+const scaleLineHeights = (css: string) => {
+  const parked: string[] = [];
+  const masked = css.replace(
+    /\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|url\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\s*\)|@[\w-]+[^{;]*/gi,
+    (token) => `READEST_LH_${parked.push(token) - 1}_PLACEHOLDER`,
+  );
+  const scaled = masked.replace(
+    /(^|[{\s;])(line-height|font)(\s*:\s*)([^;{}]*)/gi,
+    (match, prefix: string, prop: string, sep: string, value: string) => {
+      if (value.includes(LINE_HEIGHT_SCALE_VAR)) return match;
+      const important = /\s*!\s*important\s*$/i.exec(value);
+      const main = important ? value.slice(0, important.index) : value;
+      const tail = important ? important[0] : '';
+      if (prop.toLowerCase() === 'line-height') {
+        const lineHeight = main.trim();
+        if (!isScalableLineHeight(lineHeight)) return match;
+        return prefix + prop + sep + scaledLineHeight(lineHeight) + tail;
+      }
+      // No spaces inside the calc(): the shorthand is split into words on them.
+      const rewritten = scaleFontShorthandLineHeight(main);
+      return rewritten === main ? match : prefix + prop + sep + rewritten + tail;
+    },
+  );
+  return scaled.replace(/READEST_LH_(\d+)_PLACEHOLDER/g, (_, i: string) => parked[+i]!);
+};
+
 // `style` attributes don't pass through transformStylesheet.
 export const transformInlineFonts = (css: string) =>
-  scaleFontRelativeLengths(
-    css
-      .replace(/(font-family\s*:)([^;{}!]*)/gi, wrapFontFamily)
-      .replace(FONT_SHORTHAND_REGEX, wrapFontShorthand),
+  scaleLineHeights(
+    scaleFontRelativeLengths(
+      css
+        .replace(/(font-family\s*:)([^;{}!]*)/gi, wrapFontFamily)
+        .replace(FONT_SHORTHAND_REGEX, wrapFontShorthand),
+    ),
   );
 
 export const transformStylesheet = (
@@ -1926,7 +2017,9 @@ export const transformStylesheet = (
 
   // Last, so the passes above still read the lengths the book wrote, such as
   // a band's negative margin (#5711).
-  return scaleFontRelativeLengths(css.replace(FONT_SHORTHAND_REGEX, wrapFontShorthand));
+  return scaleLineHeights(
+    scaleFontRelativeLengths(css.replace(FONT_SHORTHAND_REGEX, wrapFontShorthand)),
+  );
 };
 
 export const applyThemeModeClass = (document: Document, isDarkMode: boolean) => {

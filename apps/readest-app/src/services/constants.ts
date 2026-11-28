@@ -442,6 +442,7 @@ export const DEFAULT_BOOK_STYLE: BookStyle = {
   zoomLevel: 100,
   paragraphMargin: 0.6,
   lineHeight: 1.4,
+  lineHeightScale: 1,
   wordSpacing: 0,
   letterSpacing: 0,
   textIndent: 0,

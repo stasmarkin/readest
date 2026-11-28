@@ -255,6 +255,12 @@ const layoutPanelItems = [
     section: 'Paragraph',
   },
   {
+    id: 'settings.layout.lineSpacingScale',
+    labelKey: _('Line Spacing Scale'),
+    keywords: ['line', 'spacing', 'height', 'leading', 'scale', 'multiplier'],
+    section: 'Paragraph',
+  },
+  {
     id: 'settings.layout.wordSpacing',
     labelKey: _('Word Spacing'),
     keywords: ['word', 'spacing', 'gap'],

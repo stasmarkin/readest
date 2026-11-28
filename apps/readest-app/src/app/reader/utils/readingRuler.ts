@@ -25,7 +25,8 @@ type RulerRect = {
 
 type RulerContainerRect = { top: number; left: number; right: number };
 
-type ReadingRulerSettings = Pick<ViewSettings, 'defaultFontSize' | 'lineHeight'>;
+type ReadingRulerSettings = Pick<ViewSettings, 'defaultFontSize' | 'lineHeight'> &
+  Partial<Pick<ViewSettings, 'lineHeightScale'>>;
 
 /**
  * `Range.getClientRects()` aggregates the border boxes of every fully-enclosed
@@ -177,7 +178,7 @@ export const calculateReadingRulerSize = (
   }
 
   const fontSize = viewSettings.defaultFontSize || 16;
-  const lineHeight = viewSettings.lineHeight || 1.5;
+  const lineHeight = (viewSettings.lineHeight || 1.5) * (viewSettings.lineHeightScale ?? 1);
   return Math.round(lines * fontSize * lineHeight);
 };
 
@@ -196,7 +197,7 @@ export const calculateReadingRulerPadding = (
     return Math.round(FIXED_LAYOUT_READING_RULER_LINE_HEIGHT * READING_RULER_PADDING_FACTOR);
   }
   const fontSize = viewSettings.defaultFontSize || 16;
-  const lineHeight = viewSettings.lineHeight || 1.5;
+  const lineHeight = (viewSettings.lineHeight || 1.5) * (viewSettings.lineHeightScale ?? 1);
   return Math.round(fontSize * lineHeight * READING_RULER_PADDING_FACTOR);
 };
 

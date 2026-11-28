@@ -286,14 +286,15 @@ describe('getLayoutStyles branches (via getStyles)', () => {
   it('adds !important to layout properties when overrideLayout is true', () => {
     const vs = makeViewSettings({ overrideLayout: true, lineHeight: 1.6 });
     const css = getStyles(vs, theme);
-    expect(css).toContain('line-height: 1.6 !important');
+    expect(css).toContain(
+      'line-height: calc(1.6 * var(--readest-line-height-scale, 1)) !important',
+    );
   });
 
   it('does not add !important to layout properties when overrideLayout is false', () => {
     const vs = makeViewSettings({ overrideLayout: false, lineHeight: 1.6 });
     const css = getStyles(vs, theme);
-    // Should have line-height: 1.6 without !important after it
-    expect(css).toMatch(/line-height: 1\.6\s*[^!]/);
+    expect(css).toContain('line-height: calc(1.6 * var(--readest-line-height-scale, 1)) ;');
   });
 
   it('sets word-spacing and letter-spacing', () => {
@@ -436,7 +437,7 @@ describe('getLayoutStyles branches (via getStyles)', () => {
     const css = getStyles(vs, theme);
     // paragraph-specific tokens driven by the Paragraph section must be absent
     expect(css).not.toContain('--default-text-align:');
-    expect(css).not.toContain('line-height: 1.7');
+    expect(css).not.toContain('line-height: calc(1.7');
     expect(css).not.toContain('word-spacing: 3px');
     expect(css).not.toContain('letter-spacing: 2px');
     expect(css).not.toContain('text-indent: 2em');
@@ -469,7 +470,7 @@ describe('getLayoutStyles branches (via getStyles)', () => {
     });
     const css = getStyles(vs, theme);
     expect(css).toContain('--default-text-align: justify');
-    expect(css).toContain('line-height: 1.7');
+    expect(css).toContain('line-height: calc(1.7');
     expect(css).toContain('word-spacing: 3px');
     expect(css).toContain('letter-spacing: 2px');
     expect(css).toContain('text-indent: 2em');
