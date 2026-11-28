@@ -6,7 +6,7 @@ import type { LibraryBook } from './books.ts';
 import { hash7, liveBooks, loadLibrary, ms, parseMetadata } from './books.ts';
 import type { Profile } from './config.ts';
 import type { Deps } from './deps.ts';
-import { AuthRequiredError, CliError, UsageError } from './errors.ts';
+import { AuthRequiredError, CliError, markUncertain, UsageError } from './errors.ts';
 import { md5Fingerprint, partialMD5Bytes } from './hash.ts';
 import { withLock } from './lock.ts';
 import { EXT, readBookFile } from './metadata.ts';
@@ -27,7 +27,7 @@ export type Decision = {
 
 export type UploadResult = {
   file: string;
-  status: Decision['kind'] | 'error';
+  status: Decision['kind'] | 'error' | 'replaced';
   reason?: string;
   hash?: string;
   title?: string;
@@ -38,14 +38,20 @@ export type UploadResult = {
   metaHash?: string | null;
   author?: string;
   keys?: string[];
+  /** On an error: the outcome is unknown (the write may have applied), so a retry is due. */
+  uncertain?: true;
+  replacedHash?: string;
+  step?: 'uploaded' | 'already' | 'reuploaded' | 'revived';
 };
 
 type StorageApi = Pick<ApiClient, 'storageList' | 'downloadUrl' | 'probeObject'>;
 
 export const probeBook = async (api: StorageApi, hash: string, ext: string): Promise<Probe> => {
   const files = await api.storageList(hash);
+  // The list also carries files of related replicas: only this book's own record stands for it.
   const record = files.find(
-    (f) => f.file_key.endsWith(`.${ext}`) && !f.file_key.endsWith('/cover.png'),
+    (f) =>
+      f.book_hash === hash && f.file_key.endsWith(`.${ext}`) && !f.file_key.endsWith('/cover.png'),
   );
   if (!record) return { present: false };
   let url: string;
@@ -70,7 +76,7 @@ export const decide = async (
   info: BookFileInfo,
   books: LibraryBook[],
   probe: (hash: string) => Promise<Probe>,
-  opts: { allowDuplicate: boolean },
+  opts: { allowDuplicate: boolean; excludeFromDuplicates?: string },
 ): Promise<Decision> => {
   const server = books.find((b) => b.hash === info.hash);
   const hasCover = !!info.cover;
@@ -97,7 +103,9 @@ export const decide = async (
     return { kind: 'revived', server, bookFileName: fileNameOf(info, p), uploadCover: hasCover };
   }
   if (!opts.allowDuplicate && info.metaHash) {
-    const dup = liveBooks(books).find((b) => b.metaHash === info.metaHash);
+    const dup = liveBooks(books).find(
+      (b) => b.metaHash === info.metaHash && b.hash !== opts.excludeFromDuplicates,
+    );
     if (dup) {
       return {
         kind: 'skipped',
@@ -156,6 +164,10 @@ export const bookFromDbRow = (r: DbBookRow): WireBook => {
   return b;
 };
 
+/** The server keeps the row with the later updated_at: beat it even if its writer's clock runs ahead. */
+export const beatRow = (now: number, r: DbBookRow): number =>
+  Math.max(now, ms(r.updated_at) + 1, ms(r.deleted_at) + 1);
+
 export const buildRow = (
   info: BookFileInfo,
   d: Decision,
@@ -194,8 +206,7 @@ export const buildRow = (
     };
   }
   const base = bookFromDbRow(d.server.raw);
-  // The server keeps the row with the later updated_at: beat it even if its writer's clock runs ahead.
-  const updatedAt = Math.max(now, ms(d.server.raw.updated_at) + 1, ms(d.server.raw.deleted_at) + 1);
+  const updatedAt = beatRow(now, d.server.raw);
   if (d.kind === 'reuploaded') return { ...base, uploadedAt: now, updatedAt, ...newCover };
   return {
     ...base,
@@ -216,7 +227,16 @@ export const uploadLockPath = (deps: Deps, profile: Profile) =>
   join(configDir(deps), `upload-${profile.key}.lock`);
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
-const isLockLost = (e: unknown) => e instanceof CliError && e.message.startsWith('lock lost');
+export const isLockLost = (e: unknown) =>
+  e instanceof CliError && e.message.startsWith('lock lost');
+
+/** A failed item; a lost lock counts as unknown too: the write it guarded may have been next. */
+export const errorResult = (file: string, e: unknown): UploadResult => ({
+  file,
+  status: 'error',
+  reason: message(e),
+  ...(isLockLost(e) || (e instanceof CliError && e.uncertain) ? { uncertain: true as const } : {}),
+});
 
 /** A failed POST that may still have been applied: network errors, timeouts, 5xx. */
 const isUncertain = (e: unknown) =>
@@ -237,11 +257,28 @@ const rowBytes = (row: WireBook) =>
 const isOurs = (got: DbBookRow | undefined, row: WireBook) =>
   !!got && !got.deleted_at && ms(got.uploaded_at) === row.uploadedAt;
 
-type Ctx = {
+export type Ctx = {
   deps: Deps;
   api: ApiClient;
   opts: { group?: string; dryRun: boolean; allowDuplicate: boolean };
   held: { assertHeld: () => void };
+};
+
+/** What `--replace` adds to an upload: fields of the old row carried onto the new one. */
+export type Carry = {
+  overlay: (row: WireBook, current?: LibraryBook) => WireBook;
+  /** Whether a row of the new book already carries them. */
+  settled: (row: DbBookRow) => boolean;
+  /** Accept a complete new book (`already`) as it is, without carrying anything. */
+  keepAlready: boolean;
+};
+
+export type UploadHooks = {
+  /** A hash whose row never counts as a duplicate: the book being replaced. */
+  excludeFromDuplicates?: string;
+  /** An existing row of the new hash is taken over only with this meta_hash. */
+  expectMeta?: string;
+  carry?: Carry;
 };
 
 const groupOf = (d: Decision, opts: Ctx['opts']): string | null => {
@@ -256,6 +293,7 @@ const resultOf = (
   info: BookFileInfo,
   d: Decision,
   group: string | null,
+  metaHash: string | null,
 ): UploadResult => ({
   file,
   status: d.kind,
@@ -264,37 +302,96 @@ const resultOf = (
   title: info.title,
   ...(group ? { group } : {}),
   ...(d.dup ? { duplicateOf: { hash: d.dup.hash, title: d.dup.title } } : {}),
+  metaHash,
 });
 
-const uploadOne = async (ctx: Ctx, file: string): Promise<UploadResult> => {
+export const uploadOneWith = async (
+  ctx: Ctx,
+  file: string,
+  hooks: UploadHooks = {},
+  known?: BookFileInfo,
+): Promise<UploadResult> => {
   const { deps, api, opts } = ctx;
-  const info = await readBookFile(file);
+  const { carry } = hooks;
+  const info = known ?? (await readBookFile(file));
   const probe = (h: string) => probeBook(api, h, EXT[info.format]);
+  const decideOpts = {
+    allowDuplicate: opts.allowDuplicate,
+    ...(hooks.excludeFromDuplicates !== undefined
+      ? { excludeFromDuplicates: hooks.excludeFromDuplicates }
+      : {}),
+  };
+
+  /** Set before the first write: after it, a failed read leaves the outcome unknown. */
+  let wrote = false;
+  const control = async <T>(p: () => Promise<T>): Promise<T> => {
+    try {
+      return await p();
+    } catch (e) {
+      throw wrote ? markUncertain(e) : e;
+    }
+  };
 
   /** Every decision is made on this book's rows (by hash or metaHash) fresh from the server. */
   let rows: LibraryBook[] = [];
-  const reread = async (): Promise<LibraryBook | undefined> => {
-    rows = await loadLibrary({ pullBooks: () => api.pullBookRows(info.hash, info.metaHash) });
-    return rows.find((b) => b.hash === info.hash);
+  const reread = (): Promise<LibraryBook | undefined> =>
+    control(async () => {
+      rows = await loadLibrary({ pullBooks: () => api.pullBookRows(info.hash, info.metaHash) });
+      return rows.find((b) => b.hash === info.hash);
+    });
+
+  const redecide = async (): Promise<Decision> => {
+    const dd = await control(() => decide(info, rows, probe, decideOpts));
+    const own = dd.server?.metaHash ?? null;
+    if (hooks.expectMeta !== undefined && dd.server && own !== hooks.expectMeta) {
+      throw new CliError(
+        `conflict: the row of ${info.hash} has meta_hash ${own ?? 'null'}, expected ${hooks.expectMeta}`,
+      );
+    }
+    return dd;
+  };
+
+  /** `already` needs a write only to carry the old row's fields onto it. */
+  const needsPost = (dd: Decision) =>
+    dd.kind !== 'skipped' ||
+    (dd.reason === 'already' && !!carry && !carry.keepAlready && !carry.settled(dd.server!.raw));
+
+  const metaOf = (dd: Decision, row?: WireBook): string | null => {
+    if (row) return row.metaHash ?? null;
+    if (dd.reason === 'duplicate') return info.metaHash;
+    return dd.server?.raw.meta_hash ?? null;
   };
 
   const first = await reread();
-  let d = await decide(info, rows, probe, opts);
+  let d = await redecide();
 
   const uploadedKeys: string[] = [];
   const leftAt = () => uploadedKeys.join(', ');
 
   /** The row to POST, within the server's body limit; drops a too-large description once. */
+  const rowOf = (dd: Decision, cover?: { hash: string }): WireBook => {
+    if (dd.kind === 'skipped') {
+      const raw = dd.server!.raw;
+      return carry!.overlay(
+        { ...bookFromDbRow(raw), updatedAt: beatRow(deps.now(), raw) },
+        dd.server,
+      );
+    }
+    const row = buildRow(info, dd, opts, deps.now(), cover);
+    return carry ? carry.overlay(row, dd.server) : row;
+  };
+
   const sizedRow = (dd: Decision, cover?: { hash: string }): WireBook => {
-    let row = buildRow(info, dd, opts, deps.now(), cover);
+    let row = rowOf(dd, cover);
     if (
       rowBytes(row) > MAX_ROW_BYTES &&
       dd.kind !== 'reuploaded' &&
+      dd.kind !== 'skipped' &&
       info.metadata.description !== undefined
     ) {
       delete info.metadata.description;
       deps.stderr(`warning: ${file}: the description is too large for the sync row; dropped it\n`);
-      row = buildRow(info, dd, opts, deps.now(), cover);
+      row = rowOf(dd, cover);
     }
     if (rowBytes(row) > MAX_ROW_BYTES) {
       const left = uploadedKeys.length ? `; uploaded objects left at ${leftAt()}` : '';
@@ -303,7 +400,7 @@ const uploadOne = async (ctx: Ctx, file: string): Promise<UploadResult> => {
     return row;
   };
 
-  const finish = (dd: Decision, group: string | null): UploadResult => {
+  const finish = (dd: Decision, group: string | null, metaHash: string | null): UploadResult => {
     if (opts.group !== undefined && (dd.kind === 'skipped' || dd.kind === 'reuploaded')) {
       const groupName = dd.dup ? dd.dup.groupName : group;
       deps.stderr(
@@ -312,18 +409,18 @@ const uploadOne = async (ctx: Ctx, file: string): Promise<UploadResult> => {
         }\n`,
       );
     }
-    return resultOf(file, info, dd, group);
+    return resultOf(file, info, dd, group, metaHash);
   };
 
   const plannedCover = (dd: Decision) =>
     dd.uploadCover && info.cover ? { hash: partialMD5Bytes(info.cover) } : undefined;
-  const planned = d.kind === 'skipped' ? undefined : sizedRow(d, plannedCover(d));
+  const planned = needsPost(d) ? sizedRow(d, plannedCover(d)) : undefined;
 
   if (opts.dryRun) {
     const keys =
       d.kind === 'skipped' ? [] : [d.bookFileName, ...(d.uploadCover ? [coverKey(info.hash)] : [])];
     return {
-      ...finish(d, groupOf(d, opts)),
+      ...finish(d, groupOf(d, opts), null),
       dryRun: true,
       format: info.format,
       metaHash: planned ? (planned.metaHash ?? null) : info.metaHash,
@@ -331,7 +428,7 @@ const uploadOne = async (ctx: Ctx, file: string): Promise<UploadResult> => {
       keys,
     };
   }
-  if (d.kind === 'skipped') return finish(d, groupOf(d, opts));
+  if (!needsPost(d)) return finish(d, groupOf(d, opts), metaOf(d));
 
   const duplicateAppeared = (): UploadResult => ({
     file,
@@ -342,7 +439,7 @@ const uploadOne = async (ctx: Ctx, file: string): Promise<UploadResult> => {
   const finishLate = (dd: Decision): UploadResult =>
     dd.kind === 'skipped' && dd.reason === 'duplicate'
       ? duplicateAppeared()
-      : finish(dd, groupOf(dd, opts));
+      : finish(dd, groupOf(dd, opts), metaOf(dd));
 
   const putDone = new Set<string>();
   let coverTried = false;
@@ -351,6 +448,7 @@ const uploadOne = async (ctx: Ctx, file: string): Promise<UploadResult> => {
   const putBook = async (fileName: string) => {
     let up: { uploadUrl: string; fileKey: string };
     ctx.held.assertHeld();
+    wrote = true;
     try {
       up = await api.uploadUrl(fileName, info.size, info.hash);
     } catch (e) {
@@ -377,9 +475,11 @@ const uploadOne = async (ctx: Ctx, file: string): Promise<UploadResult> => {
       await api.put(up.uploadUrl, { path: info.path }, info.size);
     } catch (e) {
       if (e instanceof AuthRequiredError) throw e;
-      throw new CliError(
+      const err = new CliError(
         `${message(e)}; the reservation ${up.fileKey} stays: run readest upload ${file} again`,
       );
+      err.uncertain = e instanceof CliError && e.uncertain;
+      throw err;
     }
     putDone.add(fileName);
     uploadedKeys.push(up.fileKey);
@@ -389,6 +489,7 @@ const uploadOne = async (ctx: Ctx, file: string): Promise<UploadResult> => {
   const putCover = async (bytes: Uint8Array) => {
     try {
       ctx.held.assertHeld();
+      wrote = true;
       const up = await api.uploadUrl(coverKey(info.hash), bytes.length, info.hash);
       ctx.held.assertHeld();
       await api.put(up.uploadUrl, { bytes }, bytes.length);
@@ -401,6 +502,7 @@ const uploadOne = async (ctx: Ctx, file: string): Promise<UploadResult> => {
   };
 
   const ensureFiles = async (dd: Decision) => {
+    if (dd.kind === 'skipped') return;
     if (!putDone.has(dd.bookFileName)) await putBook(dd.bookFileName);
     if (dd.uploadCover && info.cover && !coverTried) {
       coverTried = true;
@@ -413,32 +515,42 @@ const uploadOne = async (ctx: Ctx, file: string): Promise<UploadResult> => {
   // Re-read right before the POST: another client may have created or changed the row.
   let before = await reread();
   if (rowChanged(first, before)) {
-    d = await decide(info, rows, probe, opts);
-    if (d.kind === 'skipped') return finishLate(d);
+    d = await redecide();
+    if (!needsPost(d)) return finishLate(d);
     await ensureFiles(d);
   }
   if (d.kind === 'uploaded' && !opts.allowDuplicate && info.metaHash) {
-    const dup = liveBooks(rows).find((b) => b.metaHash === info.metaHash && b.hash !== info.hash);
+    const dup = liveBooks(rows).find(
+      (b) =>
+        b.metaHash === info.metaHash &&
+        b.hash !== info.hash &&
+        b.hash !== hooks.excludeFromDuplicates,
+    );
     if (dup) return duplicateAppeared();
   }
+  const accepted = (got: DbBookRow | undefined, row: WireBook) =>
+    isOurs(got, row) && (!carry || carry.settled(got!));
 
   for (let attempt = 0; ; attempt++) {
     const row = sizedRow(d, d.uploadCover ? cover : undefined);
     ctx.held.assertHeld();
+    wrote = true;
     let resp: DbBookRow[];
     try {
       resp = await api.pushBooks([row]);
     } catch (e) {
       if (!isUncertain(e)) throw e;
       const now = await reread();
-      if (isOurs(now?.raw, row)) return finish(d, now!.raw.group_name ?? null);
+      if (accepted(now?.raw, row)) return finish(d, now!.raw.group_name ?? null, metaOf(d, row));
       // Unchanged since the re-read: the POST did not apply.
       if (!rowChanged(before, now) || attempt > 0) {
-        throw new CliError(`sync not confirmed (${message(e)}): run readest upload ${file} again`);
+        throw markUncertain(
+          new CliError(`sync not confirmed (${message(e)}): run readest upload ${file} again`),
+        );
       }
       before = now;
-      d = await decide(info, rows, probe, opts);
-      if (d.kind === 'skipped') return finishLate(d);
+      d = await redecide();
+      if (!needsPost(d)) return finishLate(d);
       await ensureFiles(d);
       continue;
     }
@@ -450,8 +562,14 @@ const uploadOne = async (ctx: Ctx, file: string): Promise<UploadResult> => {
         }, uploaded_at ${got?.uploaded_at ?? 'null'})`,
       );
     }
+    if (carry && !carry.settled(got!)) {
+      // The new row is in, only without the old fields: a resumed replace carries them again.
+      throw markUncertain(
+        new CliError('conflict: the server did not keep the fields carried from the old row'),
+      );
+    }
     // The server merges the group by its own clock and may keep the old one.
-    return finish(d, got!.group_name ?? null);
+    return finish(d, got!.group_name ?? null, metaOf(d, row));
   }
 };
 
@@ -461,7 +579,7 @@ export const runUpload = async (
   api: ApiClient,
   profile: Profile,
   files: string[],
-  opts: { group?: string; dryRun: boolean; allowDuplicate: boolean },
+  opts: { group?: string; dryRun: boolean; allowDuplicate: boolean; expectMeta?: string },
 ): Promise<UploadResult[]> => {
   groupFields(opts.group);
   await api.ensureAuth();
@@ -474,13 +592,17 @@ export const runUpload = async (
     },
     async (held) => {
       const ctx: Ctx = { deps, api, opts, held };
+      const hooks: UploadHooks =
+        opts.expectMeta !== undefined ? { expectMeta: opts.expectMeta } : {};
       const results: UploadResult[] = [];
       for (const file of files) {
         try {
-          results.push(await uploadOne(ctx, file));
+          results.push(await uploadOneWith(ctx, file, hooks));
         } catch (e) {
-          if (e instanceof AuthRequiredError || isLockLost(e)) throw e;
-          results.push({ file, status: 'error', reason: message(e) });
+          if (e instanceof AuthRequiredError) throw e;
+          results.push(errorResult(file, e));
+          // Another process owns the profile now: no further writes.
+          if (isLockLost(e)) break;
         }
       }
       return results;
@@ -513,7 +635,10 @@ export const uploadText = (results: UploadResult[]): string =>
           `  keys:     ${r.keys?.length ? r.keys.join(', ') : '-'}`,
         ].join('\n');
       }
-      return `${label(r)}  ${hash7(r.hash ?? '')}  ${r.title ?? ''}${r.group ? `  [${r.group}]` : ''}`;
+      const replaced = r.replacedHash
+        ? `  (replaces ${hash7(r.replacedHash)}, ${r.step ?? ''})`
+        : '';
+      return `${label(r)}  ${hash7(r.hash ?? '')}  ${r.title ?? ''}${r.group ? `  [${r.group}]` : ''}${replaced}`;
     })
     .map((line) => `${line}\n`)
     .join('');

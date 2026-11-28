@@ -2,7 +2,7 @@ import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import type { Profile } from './config.ts';
 import type { Deps } from './deps.ts';
-import { AuthRequiredError, CliError } from './errors.ts';
+import { AuthRequiredError, CliError, markUncertain, UsageError } from './errors.ts';
 import { refresh } from './session.ts';
 
 /** A `books` row as the sync API returns it (src/types/records.ts DBBook). */
@@ -136,16 +136,23 @@ const stringField = (body: unknown, key: string, what: string): string => {
   return v;
 };
 
+export type SessionInfo = { email: string; userId: string; expiresAt: number };
+
+export const isBookHash = (s: string) => /^[0-9a-f]{32}$/.test(s);
+
 export class ApiClient {
   deps: Deps;
   profile: Profile;
   #token: Promise<string> | undefined;
   /** The account the run started with: a session of another one is never used. */
   #userId: string | undefined;
+  #infos = new Map<string, SessionInfo>();
+  #verified: SessionInfo | undefined;
 
-  constructor(deps: Deps, profile: Profile) {
+  constructor(deps: Deps, profile: Profile, opts: { expectUserId?: string } = {}) {
     this.deps = deps;
     this.profile = profile;
+    this.#userId = opts.expectUserId;
   }
 
   #session(rejectedToken?: string): Promise<string> {
@@ -154,6 +161,11 @@ export class ApiClient {
       ...(this.#userId !== undefined ? { userId: this.#userId } : {}),
     }).then((s) => {
       this.#userId ??= s.user.id;
+      this.#infos.set(s.access_token, {
+        email: s.user.email,
+        userId: s.user.id,
+        expiresAt: s.expires_at,
+      });
       return s.access_token;
     });
     this.#token = p;
@@ -170,6 +182,21 @@ export class ApiClient {
   /** Fails with exit 3 before any per-file work when there is no usable session. */
   async ensureAuth(): Promise<void> {
     await this.#currentToken();
+  }
+
+  /** The account of the last token the server accepted. */
+  sessionInfo(): SessionInfo {
+    if (!this.#verified) throw new CliError('internal: no request has passed yet');
+    return this.#verified;
+  }
+
+  /** A cheap authenticated read: proves the session works on the server. */
+  async ping(): Promise<void> {
+    const body = await this.request('GET', '/sync', {
+      query: { type: 'books', since: String(this.deps.now()) },
+    });
+    // A proxy's 200 page is no proof the server took the token.
+    arrayField<DbBookRow>(body, 'books', 'GET /api/sync');
   }
 
   async request(
@@ -203,9 +230,18 @@ export class ApiClient {
           retried = true;
           continue;
         }
-        throw new CliError(`${label} failed: ${(e as Error).message}`);
+        const err = new CliError(`${label} failed: ${(e as Error).message}`);
+        err.uncertain = method !== 'GET';
+        throw err;
       }
-      const body = await parseJson(res);
+      let body: unknown;
+      try {
+        body = await parseJson(res);
+      } catch (e) {
+        const err = new CliError(`${label} failed reading the response: ${(e as Error).message}`);
+        err.uncertain = method !== 'GET';
+        throw err;
+      }
       if ((res.status === 401 || res.status === 403) && errorField(body) === 'Not authenticated') {
         if (refreshed) throw new AuthRequiredError();
         refreshed = true;
@@ -218,12 +254,15 @@ export class ApiClient {
       }
       if (!res.ok) {
         const detail = errorField(body);
-        throw new HttpError(
+        const err = new HttpError(
           `${label} → ${res.status}${detail ? `: ${detail}` : ''}`,
           res.status,
           body,
         );
+        err.uncertain = method !== 'GET' && res.status >= 500;
+        throw err;
       }
+      this.#verified = this.#infos.get(token);
       return body;
     }
   }
@@ -253,12 +292,34 @@ export class ApiClient {
     const body = await this.request('POST', '/sync', {
       body: { books: rows, notes: [], configs: [] },
     });
-    return arrayField<DbBookRow>(body, 'books', 'POST /api/sync');
+    try {
+      return arrayField<DbBookRow>(body, 'books', 'POST /api/sync');
+    } catch (e) {
+      // The write was answered, but not as the server does: it may have applied.
+      throw markUncertain(e);
+    }
   }
 
   async storageList(bookHash: string): Promise<FileRow[]> {
     const body = await this.request('GET', '/storage/list', { query: { bookHash } });
     return arrayField<FileRow>(body, 'files', 'GET /api/storage/list');
+  }
+
+  /** The book's own objects: an empty bookHash would make the server list every file of the user. */
+  async bookObjects(hash: string): Promise<FileRow[]> {
+    if (!isBookHash(hash)) throw new UsageError(`not a book hash: "${hash}"`);
+    return (await this.storageList(hash)).filter((f) => f.book_hash === hash);
+  }
+
+  /** 404 is not proof of absence: the caller re-lists to check. */
+  async deleteObject(fileKey: string): Promise<'deleted' | 'missing'> {
+    try {
+      await this.request('DELETE', '/storage/delete', { query: { fileKey } });
+      return 'deleted';
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 404) return 'missing';
+      throw e;
+    }
   }
 
   async uploadUrl(
@@ -303,16 +364,20 @@ export class ApiClient {
         signal: AbortSignal.timeout(PUT_TIMEOUT_MS),
       } as RequestInit);
     } catch (e) {
-      throw new CliError(`upload to storage failed: ${(e as Error).message}`);
+      const err = new CliError(`upload to storage failed: ${(e as Error).message}`);
+      err.uncertain = true;
+      throw err;
     }
     if (res.status !== 200 && res.status !== 201 && res.status !== 204) {
       const text = await res.text().catch(() => '');
       const code = text.match(/<Code>([^<]*)<\/Code>/)?.[1];
-      throw new HttpError(
+      const err = new HttpError(
         `upload to storage → ${res.status}${code ? `: ${code}` : ''}`,
         res.status,
         text,
       );
+      err.uncertain = res.status >= 500;
+      throw err;
     }
     await res.body?.cancel();
   }

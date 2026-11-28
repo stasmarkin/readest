@@ -3,6 +3,18 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { transformBookToDB } from '@/utils/transform';
+import { parseBookFileKey } from '@/utils/bookFileKey';
+import type { DBBook } from '@/types/records';
+import {
+  bookGroupChanged,
+  bookMetadataChanged,
+  readingStatusChanged,
+  resolveCoverMerge,
+  resolveGroupMerge,
+  resolveMetadataMerge,
+  resolvePageCountMerge,
+  resolveReadingStatusMerge,
+} from '@/pages/api/sync';
 import type { Deps } from '../../../../../selfhost/cli/lib/deps.ts';
 import type { Profile } from '../../../../../selfhost/cli/lib/config.ts';
 import type { DbBookRow, DbNoteRow, FileRow } from '../../../../../selfhost/cli/lib/api.ts';
@@ -91,21 +103,48 @@ export const fakeServer = (opts: { quota?: number } = {}) => {
 
   const used = () => files.reduce((n, f) => n + f.file_size, 0);
 
-  /** POST /api/sync as the server does it for one fresh client row: the newer copy wins. */
+  /** Every server write stamps synced_at, like the books_set_synced_at trigger. */
+  const store = (row: DBBook): DbBookRow => {
+    const stored = { ...row, synced_at: new Date().toISOString() } as unknown as DbBookRow;
+    books.set(row.book_hash, stored);
+    return stored;
+  };
+
+  /** POST /api/sync for one books row, with the field-level merges of upsertRecords in sync.ts. */
   const merge = (wire: unknown): DbBookRow => {
-    const row = transformBookToDB(wire, UID) as unknown as DbBookRow;
-    const server = books.get(row.book_hash);
-    if (!server) {
-      row.updated_at = new Date().toISOString();
-      books.set(row.book_hash, { ...row, synced_at: new Date().toISOString() });
-      return books.get(row.book_hash)!;
+    const client = transformBookToDB(wire, UID);
+    const stored = books.get(client.book_hash);
+    if (!stored) {
+      client.updated_at = new Date().toISOString();
+      return store(client);
     }
-    const t = (s?: string | null) => (s ? Date.parse(s) : 0);
+    const server = stored as unknown as DBBook;
+    const t = (s?: string | null) => (s ? new Date(s).getTime() : 0);
     const clientIsNewer =
-      t(row.deleted_at) > t(server.deleted_at) || t(row.updated_at) > t(server.updated_at);
-    if (!clientIsNewer) return server;
-    books.set(row.book_hash, { ...row, synced_at: new Date().toISOString() });
-    return books.get(row.book_hash)!;
+      t(client.deleted_at) > t(server.deleted_at) || t(client.updated_at) > t(server.updated_at);
+    const status = resolveReadingStatusMerge(client, server);
+    const cover = resolveCoverMerge(client, server);
+    const meta = resolveMetadataMerge(client, server, clientIsNewer);
+    const group = resolveGroupMerge(client, server, clientIsNewer);
+    const pageCount = resolvePageCountMerge(client, server, clientIsNewer);
+    const originalFilename = server.original_filename || client.original_filename;
+    const fresher = {
+      ...status,
+      ...cover,
+      ...meta,
+      ...group,
+      page_count: pageCount,
+      original_filename: originalFilename,
+    };
+    if (clientIsNewer) return store({ ...client, ...fresher });
+    const changed =
+      readingStatusChanged(status.reading_status, server.reading_status) ||
+      (cover.cover_hash ?? null) !== (server.cover_hash ?? null) ||
+      bookMetadataChanged(meta, server) ||
+      bookGroupChanged(group, server) ||
+      pageCount !== (server.page_count ?? null) ||
+      (originalFilename ?? null) !== (server.original_filename ?? null);
+    return changed ? store({ ...server, ...fresher }) : stored;
   };
 
   const serve = async (url: URL, init: RequestInit): Promise<Response> => {
@@ -156,11 +195,28 @@ export const fakeServer = (opts: { quota?: number } = {}) => {
         const rows = (b['books'] as unknown[]).map(merge);
         return json(200, { books: rows, notes: [], configs: [] });
       }
-      case 'GET /api/storage/list':
-        return json(200, {
-          files: files.filter((f) => f.book_hash === q.get('bookHash')),
-          total: 0,
-        });
+      case 'GET /api/storage/list': {
+        // Like the server: an empty bookHash is no filter at all.
+        const hash = q.get('bookHash');
+        return json(200, { files: files.filter((f) => !hash || f.book_hash === hash), total: 0 });
+      }
+      case 'DELETE /api/storage/delete': {
+        // storage/delete.ts: the exact key, else the book's file by hash and extension.
+        const key = q.get('fileKey') ?? '';
+        let i = files.findIndex((f) => f.file_key === key);
+        const bookFile = i < 0 && parseBookFileKey(key);
+        if (bookFile) {
+          i = files.findIndex(
+            (f) =>
+              f.book_hash === bookFile.bookHash &&
+              f.file_key.endsWith(`.${bookFile.fileExtension}`),
+          );
+        }
+        if (i < 0) return json(404, { error: 'File not found' });
+        const [removed] = files.splice(i, 1);
+        objects.delete(removed!.file_key);
+        return json(200, { message: 'File deleted successfully' });
+      }
       case 'POST /api/storage/upload': {
         const fileKey = `${UID}/${String(b['fileName'])}`;
         const size = Number(b['fileSize']);
