@@ -1,0 +1,13 @@
+# Test stand on colima: colima forwards these ports to the Mac's localhost, the emulator reaches
+# them through `adb reverse`, so presigned URLs are the same for both clients.
+services:
+  kong:
+    ports: ["8000:8000"]
+  minio:
+    ports: ["9000:9000"]
+  client:
+    ports: ["3000:3000"]
+    environment:
+      API_BASE_URL: http://localhost:3000
+      SUPABASE_PUBLIC_URL: http://localhost:8000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000

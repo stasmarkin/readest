@@ -1,0 +1,71 @@
+# Serves the stack on one HTTPS origin through Coolify's Traefik; no host ports are published.
+networks:
+  coolify:
+    external: true
+services:
+  kong:
+    ports: !reset []
+    networks: [default, coolify]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.routers.readest-kong.rule=Host(`readest.stasmarkin.ru`) && (PathPrefix(`/auth/v1/`) || PathPrefix(`/rest/v1/`))
+      - traefik.http.routers.readest-kong.entryPoints=https
+      - traefik.http.routers.readest-kong.tls=true
+      - traefik.http.routers.readest-kong.tls.certresolver=letsencrypt
+      - traefik.http.routers.readest-kong.priority=100
+      - traefik.http.services.readest-kong.loadbalancer.server.port=8000
+  minio:
+    # Pinned like the deployed stack; upstream leaves quay.io/minio/minio floating.
+    image: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z
+    ports: !reset []
+    networks: [default, coolify]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.routers.readest-minio.rule=Host(`readest.stasmarkin.ru`) && PathPrefix(`/readest-files/`)
+      - traefik.http.routers.readest-minio.entryPoints=https
+      - traefik.http.routers.readest-minio.tls=true
+      - traefik.http.routers.readest-minio.tls.certresolver=letsencrypt
+      - traefik.http.routers.readest-minio.priority=100
+      - traefik.http.services.readest-minio.loadbalancer.server.port=9000
+  minio-setup:
+    image: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z
+  client:
+    ports: !reset []
+    networks: [default, coolify]
+    environment:
+      # Unique container names: plain service names could resolve to other containers on the shared coolify network.
+      SUPABASE_URL: http://supabase-kong:8000
+      S3_ENDPOINT: http://readest-minio:9000
+      SUPABASE_PUBLIC_URL: https://readest.stasmarkin.ru
+      S3_PUBLIC_ENDPOINT: https://readest.stasmarkin.ru
+      SELF_HOSTED: "true"
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.routers.readest-web.rule=Host(`readest.stasmarkin.ru`) && PathPrefix(`/api/`) && !PathPrefix(`/api/opds/`) && !PathPrefix(`/api/stripe/`) && !PathPrefix(`/api/gift/`)
+      - traefik.http.routers.readest-web.entryPoints=https
+      - traefik.http.routers.readest-web.tls=true
+      - traefik.http.routers.readest-web.tls.certresolver=letsencrypt
+      - traefik.http.routers.readest-web.priority=10
+      - traefik.http.services.readest-web.loadbalancer.server.port=3000
+      - traefik.http.routers.readest-web-http.rule=Host(`readest.stasmarkin.ru`)
+      - traefik.http.routers.readest-web-http.entryPoints=http
+      - traefik.http.routers.readest-web-http.middlewares=redirect-to-https
+  wellknown:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./wellknown:/usr/share/nginx/html/.well-known:ro
+      - ./wellknown.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [coolify]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.routers.readest-wk.rule=Host(`readest.stasmarkin.ru`)
+      - traefik.http.routers.readest-wk.entryPoints=https
+      - traefik.http.routers.readest-wk.tls=true
+      - traefik.http.routers.readest-wk.tls.certresolver=letsencrypt
+      - traefik.http.routers.readest-wk.priority=1
+      - traefik.http.services.readest-wk.loadbalancer.server.port=80

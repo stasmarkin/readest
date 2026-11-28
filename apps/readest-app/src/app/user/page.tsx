@@ -16,6 +16,7 @@ import { useAvailablePlans } from '@/hooks/useAvailablePlans';
 import type { PlanType } from '@/types/quota';
 import type { GiftCardsResponse, GiftPrice } from '@/types/gift';
 import { navigateBackFromProfile } from '@/utils/nav';
+import { isSelfHosted } from '@/utils/access';
 import { eventDispatcher } from '@/utils/event';
 import { isTauriAppPlatform } from '@/services/environment';
 import { getPlanDetails, shouldUseBillingPortal } from './utils/plan';
@@ -78,9 +79,12 @@ const ProfilePage = () => {
     () => searchParams?.get('section') === 'sync',
   );
   // Read once: the code is taken out of the URL as soon as the page opens.
-  const [giftCode] = useState(() => searchParams?.get('gift') || undefined);
+  const [giftCode] = useState(() =>
+    isSelfHosted() ? undefined : searchParams?.get('gift') || undefined,
+  );
   // A gift link opens redeeming; a returning gift checkout opens buying.
   const [giftView, setGiftView] = useState<GiftCardsView | null>(() => {
+    if (isSelfHosted()) return null;
     const section = searchParams?.get('section');
     if (giftCode || section === 'redeem') return 'redeem';
     return section === 'gifts' ? 'give' : null;
@@ -156,7 +160,7 @@ const ProfilePage = () => {
   // what sets the plan, for the plan cards and Manage Subscription.
   const signedIn = !!(user && token);
   useEffect(() => {
-    if (!signedIn) return;
+    if (!signedIn || isSelfHosted()) return;
     const claimThenLoad = async () => {
       try {
         if ((await claimGiftCards()) > 0) await refresh();
@@ -181,7 +185,7 @@ const ProfilePage = () => {
   const [giftPrices, setGiftPrices] = useState<GiftPrice[]>([]);
   const giftsThroughIAP = appService?.hasIAP;
   useEffect(() => {
-    if (giftsThroughIAP === undefined) return;
+    if (giftsThroughIAP === undefined || isSelfHosted()) return;
     let stale = false;
     fetchGiftPrices(giftsThroughIAP)
       .then((next) => {
@@ -530,17 +534,19 @@ const ProfilePage = () => {
                   </div>
                 ) : (
                   <>
-                    <div className='flex flex-col gap-y-8 px-2 sm:px-6'>
-                      <PlansComparison
-                        availablePlans={availablePlans}
-                        userPlan={userProfilePlan}
-                        customizationPurchased={customizationPurchased}
-                        gift={gift}
-                        giftPrices={giftPrices}
-                        onSubscribe={buyThroughIAP ? handleIAPSubscribe : handleStripeSubscribe}
-                        onGiftCard={handleGiftCard}
-                      />
-                    </div>
+                    {!isSelfHosted() && (
+                      <div className='flex flex-col gap-y-8 px-2 sm:px-6'>
+                        <PlansComparison
+                          availablePlans={availablePlans}
+                          userPlan={userProfilePlan}
+                          customizationPurchased={customizationPurchased}
+                          gift={gift}
+                          giftPrices={giftPrices}
+                          onSubscribe={buyThroughIAP ? handleIAPSubscribe : handleStripeSubscribe}
+                          onGiftCard={handleGiftCard}
+                        />
+                      </div>
+                    )}
                     <div className='flex flex-col gap-y-8 px-6'>
                       <AccountActions
                         userEmail={userEmail}
@@ -559,7 +565,7 @@ const ProfilePage = () => {
                         onManageStorage={handleManageStorage}
                         onManageSharedLinks={handleManageSharedLinks}
                         onManageSync={handleManageSync}
-                        onRedeemGiftCard={handleRedeemGiftCard}
+                        onRedeemGiftCard={isSelfHosted() ? undefined : handleRedeemGiftCard}
                       />
                     </div>
                   </>

@@ -4,8 +4,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import AccountActions from '@/app/user/components/AccountActions';
 import type { UserPlan } from '@/types/quota';
 
+const appService = vi.hoisted(() => ({ hasIAP: false }));
+
 vi.mock('@/context/EnvContext', () => ({
-  useEnv: () => ({ appService: { hasIAP: false } }),
+  useEnv: () => ({ appService }),
 }));
 vi.mock('@/hooks/useTranslation', () => ({
   useTranslation:
@@ -19,6 +21,7 @@ const renderActions = (
   customizationPurchased = false,
   giftOnly = false,
   onRedeemGiftCard?: () => void,
+  iapAvailable = false,
 ) => {
   const onConfirmDelete = vi.fn();
   const onConfirmDeleteAllBooks = vi.fn();
@@ -28,7 +31,7 @@ const renderActions = (
       planName={`${userPlan} plan`}
       userPlan={userPlan}
       customizationPurchased={customizationPurchased}
-      iapAvailable={false}
+      iapAvailable={iapAvailable}
       giftOnly={giftOnly}
       onLogout={vi.fn()}
       onResetPassword={vi.fn()}
@@ -36,6 +39,8 @@ const renderActions = (
       onConfirmDelete={onConfirmDelete}
       onConfirmDeleteAllBooks={onConfirmDeleteAllBooks}
       onRedeemGiftCard={onRedeemGiftCard}
+      onRestorePurchase={vi.fn()}
+      onManageSubscription={vi.fn()}
     />,
   );
   return { onConfirmDelete, onConfirmDeleteAllBooks };
@@ -202,5 +207,35 @@ describe('sign-in details', () => {
     expect(screen.getByRole('button', { name: 'Change Email' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Reset Password' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Update Email' })).toBeNull();
+  });
+});
+
+describe('payment actions in a self-hosted build', () => {
+  afterEach(() => {
+    appService.hasIAP = false;
+    vi.unstubAllEnvs();
+  });
+
+  it('offers Restore Purchase with IAP unless self-hosted', () => {
+    appService.hasIAP = true;
+    renderActions('free', false, false, undefined, true);
+    expect(screen.queryByRole('button', { name: 'Restore Purchase' })).toBeTruthy();
+    cleanup();
+
+    vi.stubEnv('NEXT_PUBLIC_SELF_HOSTED', 'true');
+    renderActions('free', false, false, undefined, true);
+    expect(screen.queryByRole('button', { name: 'Restore Purchase' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Sign Out' })).toBeTruthy();
+  });
+
+  it('offers Manage Subscription to a paid plan unless self-hosted', () => {
+    renderActions('plus');
+    expect(screen.queryByRole('button', { name: 'Manage Subscription' })).toBeTruthy();
+    cleanup();
+
+    vi.stubEnv('NEXT_PUBLIC_SELF_HOSTED', 'true');
+    renderActions('plus');
+    expect(screen.queryByRole('button', { name: 'Manage Subscription' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Sign Out' })).toBeTruthy();
   });
 });

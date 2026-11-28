@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { useTranslation } from '@/hooks/useTranslation';
+import { isSelfHosted } from '@/utils/access';
 
 type AuthView = 'sign_in' | 'sign_up' | 'magic_link' | 'forgotten_password';
 
@@ -193,7 +194,7 @@ export default function EmailPasswordAuth({
         </div>
       )}
       <div className='flex flex-col items-center gap-2.5 pt-1 text-sm'>
-        {view === 'sign_in' && (
+        {view === 'sign_in' && !isSelfHosted() && (
           <>
             {magicLink && (
               <button type='button' className={LINK_CLASS} onClick={switchView('magic_link')}>

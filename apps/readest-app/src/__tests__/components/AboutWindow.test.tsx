@@ -266,3 +266,17 @@ describe('AboutWindow check update error auto-revert', () => {
     expect(screen.getByRole('button', { name: 'Check Update' })).toBeTruthy();
   });
 });
+
+describe('AboutWindow in a self-hosted build', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllEnvs();
+  });
+
+  it('hides the update check and recent updates button', async () => {
+    vi.stubEnv('NEXT_PUBLIC_SELF_HOSTED', 'true');
+    await openDialog();
+
+    expect(screen.queryByRole('button', { name: 'Check Update' })).toBeNull();
+  });
+});

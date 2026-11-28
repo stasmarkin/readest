@@ -455,6 +455,39 @@ describe('updater', () => {
       expect(result).toBe(true);
       expect(mockTauriFetch).toHaveBeenCalledWith('https://example.com/release-notes.json');
     });
+
+    test('skips the release notes fetch in a self-hosted build', async () => {
+      vi.stubEnv('NEXT_PUBLIC_SELF_HOSTED', 'true');
+      mockIsTauriAppPlatform = true;
+      mockAppVersion = '2.0.0';
+      setLastShownReleaseNotesVersion('1.0.0');
+      mockTauriFetch.mockResolvedValue({ ok: true });
+
+      try {
+        const result = await checkAppReleaseNotes(false);
+
+        expect(result).toBe(false);
+        expect(mockTauriFetch).not.toHaveBeenCalled();
+        expect(mockSetUpdaterWindowVisible).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    test('still shows release notes when only the in-app updater is disabled', async () => {
+      vi.stubEnv('NEXT_PUBLIC_DISABLE_UPDATER', '1');
+      mockIsTauriAppPlatform = true;
+      mockAppVersion = '2.0.0';
+      setLastShownReleaseNotesVersion('1.0.0');
+      mockTauriFetch.mockResolvedValue({ ok: true });
+
+      try {
+        expect(await checkAppReleaseNotes(true)).toBe(true);
+        expect(mockTauriFetch).toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   // ── semver usage validation ────────────────────────────────────

@@ -14,6 +14,7 @@ import { transformBookFromDB } from '@/utils/transform';
 import { DBBook, DBBookConfig, DBBookNote } from '@/types/records';
 import { Book, BookConfig, BookDataRecord, BookNote } from '@/types/book';
 import { navigateToLogin } from '@/utils/nav';
+import { getSignedInToken } from '@/utils/access';
 import { useReaderStore } from '@/store/readerStore';
 
 const transformsFromDB = {
@@ -284,7 +285,10 @@ export function useSync(bookKey?: string) {
       if (err instanceof Error) {
         // Read live store settings, not the stale hook closure (see below).
         const latest = useSettingsStore.getState().settings;
-        if (err.message.includes('Not authenticated') && latest.keepLogin) {
+        // A client without an access token (offline, it expired and can't
+        // refresh) still has a good session unless AuthContext dropped it.
+        const noAccessToken = err.message === 'Not authenticated' && !!getSignedInToken();
+        if (err.message.includes('Not authenticated') && latest.keepLogin && !noAccessToken) {
           latest.keepLogin = false;
           setSettings(latest);
           navigateToLogin(router);

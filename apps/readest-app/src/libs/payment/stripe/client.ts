@@ -1,6 +1,7 @@
 import posthog from 'posthog-js';
 import Stripe from 'stripe';
-import { loadStripe, Stripe as StripeClient } from '@stripe/stripe-js';
+import { loadStripe } from '@stripe/stripe-js/pure';
+import type { Stripe as StripeClient } from '@stripe/stripe-js';
 import { getAPIBaseUrl, isTauriAppPlatform, isWebAppPlatform } from '@/services/environment';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { getAccessToken } from '@/utils/access';
