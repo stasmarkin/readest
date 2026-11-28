@@ -16,10 +16,9 @@ const FONT_SIZE_LIMITS = {
   DEFAULT: 16,
 } as const;
 
-const LINE_HEIGHT_LIMITS = {
-  MIN: 8,
-  MAX: 24,
-  DEFAULT: 16,
+const LINE_HEIGHT_SCALE_LIMITS = {
+  MIN: 5,
+  MAX: 25,
   MULTIPLIER: 10,
 } as const;
 
@@ -88,7 +87,12 @@ export const FontLayoutPanel: React.FC<FontLayoutPanelProps> = ({
 
   const handleLineHeightChange = useCallback(
     (value: number) => {
-      saveViewSettings(envConfig, bookKey, 'lineHeight', value / LINE_HEIGHT_LIMITS.MULTIPLIER);
+      saveViewSettings(
+        envConfig,
+        bookKey,
+        'lineHeightScale',
+        value / LINE_HEIGHT_SCALE_LIMITS.MULTIPLIER,
+      );
     },
     [envConfig, bookKey],
   );
@@ -160,13 +164,13 @@ export const FontLayoutPanel: React.FC<FontLayoutPanelProps> = ({
           onChange={handleMarginChange}
         />
         <Slider
-          label={_('Line Spacing')}
-          initialValue={(viewSettings?.lineHeight ?? 1.6) * LINE_HEIGHT_LIMITS.MULTIPLIER}
+          label={_('Line Spacing Scale')}
+          initialValue={(viewSettings?.lineHeightScale ?? 1) * LINE_HEIGHT_SCALE_LIMITS.MULTIPLIER}
           bubbleElement={<RxLineHeight size={marginIconSize} />}
           minLabel={_('Small')}
           maxLabel={_('Large')}
-          min={LINE_HEIGHT_LIMITS.MIN}
-          max={LINE_HEIGHT_LIMITS.MAX}
+          min={LINE_HEIGHT_SCALE_LIMITS.MIN}
+          max={LINE_HEIGHT_SCALE_LIMITS.MAX}
           onChange={handleLineHeightChange}
         />
       </div>

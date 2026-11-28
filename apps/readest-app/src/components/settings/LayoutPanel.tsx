@@ -43,6 +43,7 @@ const LayoutPanel: React.FC<SettingsPanelPanelProp> = ({ bookKey, onRegisterRese
 
   const [paragraphMargin, setParagraphMargin] = useState(viewSettings.paragraphMargin);
   const [lineHeight, setLineHeight] = useState(viewSettings.lineHeight);
+  const [lineHeightScale, setLineHeightScale] = useState(viewSettings.lineHeightScale ?? 1);
   const [wordSpacing, setWordSpacing] = useState(viewSettings.wordSpacing);
   const [letterSpacing, setLetterSpacing] = useState(viewSettings.letterSpacing);
   const [textIndent, setTextIndent] = useState(viewSettings.textIndent!);
@@ -121,6 +122,7 @@ const LayoutPanel: React.FC<SettingsPanelPanelProp> = ({ bookKey, onRegisterRese
     resetToDefaults({
       paragraphMargin: setParagraphMargin,
       lineHeight: setLineHeight,
+      lineHeightScale: setLineHeightScale,
       wordSpacing: setWordSpacing,
       letterSpacing: setLetterSpacing,
       textIndent: setTextIndent,
@@ -175,6 +177,11 @@ const LayoutPanel: React.FC<SettingsPanelPanelProp> = ({ bookKey, onRegisterRese
     saveViewSettings(envConfig, bookKey, 'lineHeight', lineHeight);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lineHeight]);
+
+  useEffect(() => {
+    saveViewSettings(envConfig, bookKey, 'lineHeightScale', lineHeightScale);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lineHeightScale]);
 
   useEffect(() => {
     saveViewSettings(envConfig, bookKey, 'wordSpacing', wordSpacing);
@@ -634,6 +641,15 @@ const LayoutPanel: React.FC<SettingsPanelPanelProp> = ({ bookKey, onRegisterRese
           max={3.0}
           step={0.1}
           data-setting-id='settings.layout.lineSpacing'
+        />
+        <NumberInput
+          label={_('Line Spacing Scale')}
+          value={lineHeightScale}
+          onChange={setLineHeightScale}
+          min={0.5}
+          max={2.5}
+          step={0.1}
+          data-setting-id='settings.layout.lineSpacingScale'
         />
         {langCode !== 'zh' && (
           <NumberInput

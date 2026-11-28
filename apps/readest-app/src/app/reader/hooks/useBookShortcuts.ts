@@ -51,7 +51,7 @@ const useBookShortcuts = ({ sideBarBookKey, bookKeys }: UseBookShortcutsProps) =
   const lastParagraphToggleRef = useRef(0);
   const viewSettings = getViewSettings(sideBarBookKey ?? '');
   const fontSize = viewSettings?.defaultFontSize ?? 16;
-  const lineHeight = viewSettings?.lineHeight ?? 1.6;
+  const lineHeight = (viewSettings?.lineHeight ?? 1.6) * (viewSettings?.lineHeightScale ?? 1);
   const distance = fontSize * lineHeight * 3;
 
   const moveReadingRuler = (side: 'left' | 'right' | 'up' | 'down') => {

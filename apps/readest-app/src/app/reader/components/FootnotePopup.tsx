@@ -927,7 +927,7 @@ const FootnotePopup: React.FC<FootnotePopupProps> = ({
       // takes the reader's typography rather than the app's (#3602).
       elem.style.fontFamily = getBaseFontFamily(viewSettings);
       elem.style.fontSize = `${getBaseFontSize(viewSettings)}px`;
-      elem.style.lineHeight = `${viewSettings.lineHeight}`;
+      elem.style.lineHeight = `${viewSettings.lineHeight * (viewSettings.lineHeightScale ?? 1)}`;
       elem.style.fontWeight = `${viewSettings.fontWeight}`;
       // Measure the text in the room the popup actually gives it — the seed
       // less the container border — so the paragraph wraps identically once

@@ -122,6 +122,7 @@
   "Insufficient storage quota": "Недостаточно квоты хранилища",
   "Font Weight": "Насыщенность шрифта",
   "Line Spacing": "Межстрочный интервал",
+  "Line Spacing Scale": "Множитель межстрочного интервала",
   "Word Spacing": "Межсловный интервал",
   "Letter Spacing": "Межбуквенный интервал",
   "Text Indent": "Отступ текста",

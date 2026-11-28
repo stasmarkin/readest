@@ -290,7 +290,7 @@ describe('transformStylesheet', () => {
       expect(
         transformInlineFonts('font: italic bold 1.2em / 1.5 "Futura", sans-serif !important'),
       ).toBe(
-        'font: italic bold 1.2em / 1.5 var(--book-sans-serif, "Futura", sans-serif) !important',
+        'font: italic bold 1.2em / calc(1.5*var(--readest-line-height-scale,1)) var(--book-sans-serif, "Futura", sans-serif) !important',
       );
       expect(
         transformStylesheet('p { font: small-caps 700 12px Palatino, serif; }', VW, VH, VERTICAL),

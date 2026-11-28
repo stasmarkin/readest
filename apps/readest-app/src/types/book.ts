@@ -322,6 +322,7 @@ export interface BookStyle {
   zoomLevel: number;
   paragraphMargin: number;
   lineHeight: number;
+  lineHeightScale: number;
   wordSpacing: number;
   letterSpacing: number;
   textIndent: number;
